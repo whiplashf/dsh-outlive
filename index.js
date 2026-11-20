@@ -100,8 +100,13 @@ function writeTasks(tasks) {
 }
 
 /** Content-addressed id: saving the same command twice updates one row. */
-function taskKey(command) {
-  return createHash('sha256').update(String(command)).digest('hex').slice(0, 12)
+function taskKey(command, kind = 'run') {
+  return createHash('sha256').update(`${kind}\u0000${String(command)}`).digest('hex').slice(0, 12)
+}
+
+/** 'run' = a shell command; 'agent' = a task description for a coding agent. */
+function taskKind(value) {
+  return value === 'agent' ? 'agent' : 'run'
 }
 
 /**
@@ -110,15 +115,17 @@ function taskKey(command) {
  * Identity is the command text, so re-saving an edited label keeps one row
  * instead of growing a duplicate with the same meaning.
  */
-function saveTask({ label, command, cwd }) {
+function saveTask({ label, command, cwd, kind }) {
   const text = String(command ?? '').trim()
   if (!text) return undefined
   const tasks = readTasks()
-  const id = taskKey(text)
+  const mode = taskKind(kind)
+  const id = taskKey(text, mode)
   const now = new Date().toISOString()
   const existing = tasks.find((task) => task.id === id)
   const next = {
     id,
+    kind: mode,
     command: text,
     label: String(label ?? '').trim() || existing?.label || text.split('\n')[0].slice(0, 60),
     cwd: String(cwd ?? '').trim() || existing?.cwd || '',
@@ -678,6 +685,39 @@ export function apply(ctx, config = {}) {
     parameters: parameterSchema(definition.parameters),
   })
 
+/** Hand one task description to a coding agent — shared by the tool and the panel. */
+async function startAgentTask({ task, engine: requested, label, cwd, runtimeMaxSec, agent }) {
+  const text = String(task ?? '').trim()
+  if (!text) return { error: 'task 不能为空' }
+  const resolved = resolveEngine(requested, config)
+  if (resolved.error) return { error: resolved.error }
+  const title = String(label ?? '').trim() || text.split('\n')[0].slice(0, 60)
+  const id = randomUUID().replaceAll('-', '').slice(0, 12)
+  const dir = jobDir(id)
+  mkdirSync(dir, { recursive: true })
+  const taskFile = join(dir, 'task.txt')
+  writeFileSync(taskFile, text)
+  const command = resolved.build(taskFile, title)
+  const { job, error } = await dispatch({
+    kind: 'agent',
+    id,
+    dir,
+    command,
+    cwd,
+    label: title,
+    runtimeMaxSec,
+  })
+  if (error) return { error: `投递失败（${error}）\n目录：${dir}`, job }
+  if (agent) {
+    const sessionId = sessionKey(agent)
+    if (sessionId) {
+      agents.set(sessionId, agent)
+      patchJob(job.id, { sessionId, engine: resolved.engine.name })
+    }
+  }
+  return { job, resolved, taskFile }
+}
+
   // The panel lives on the same origin as the page, so it rides the host web
   // server instead of opening a port of its own. No secrets cross this line:
   // job labels, statuses and the tail of a log the model can already read.
@@ -736,7 +776,7 @@ export function apply(ctx, config = {}) {
         }
         const body = await readPanelJson(req, res)
         if (body === undefined) return undefined
-        const task = saveTask({ label: body.label, command: body.command, cwd: body.cwd })
+        const task = saveTask({ label: body.label, command: body.command, cwd: body.cwd, kind: body.kind })
         if (!task) return sendJson(res, 400, { error: 'command 不能为空' })
         return sendJson(res, 200, { task, tasks: readTasks() })
       },
@@ -758,18 +798,39 @@ export function apply(ctx, config = {}) {
       async handler(req, res) {
         const body = await readPanelJson(req, res)
         if (body === undefined) return undefined
-        const command = String(body.command ?? '').trim()
-        if (!command) return sendJson(res, 400, { error: 'command 不能为空' })
-        const { job, error } = await dispatch({
-          kind: 'run',
-          command,
-          cwd: String(body.cwd ?? '').trim() || undefined,
-          label: String(body.label ?? '').trim() || undefined,
-          runtimeMaxSec: runtimeMax(body.runtime_max_sec),
+        const text = String(body.command ?? '').trim()
+        if (!text) return sendJson(res, 400, { error: 'command 不能为空' })
+        const cwd = String(body.cwd ?? '').trim() || undefined
+        const label = String(body.label ?? '').trim() || undefined
+        const mode = taskKind(body.kind)
+
+        // Two flavours share one route: a shell command, or a task description
+        // handed to whichever coding agent is installed. From the panel they
+        // look the same — that difference is the point.
+        const started = mode === 'agent'
+          ? await startAgentTask({
+            task: text,
+            engine: body.engine,
+            label,
+            cwd,
+            runtimeMaxSec: runtimeMax(body.runtime_max_sec),
+          })
+          : await dispatch({
+            kind: 'run',
+            command: text,
+            cwd,
+            label,
+            runtimeMaxSec: runtimeMax(body.runtime_max_sec),
+          })
+
+        if (started.error) return sendJson(res, 500, { error: started.error })
+        if (body.taskId) bumpTask(String(body.taskId), started.job.id)
+        return sendJson(res, 200, {
+          id: started.job.id,
+          unit: started.job.unit,
+          kind: mode,
+          engine: mode === 'agent' ? started.resolved.engine.name : undefined,
         })
-        if (error) return sendJson(res, 500, { error })
-        if (body.taskId) bumpTask(String(body.taskId), job.id)
-        return sendJson(res, 200, { id: job.id, unit: job.unit })
       },
     }))
   })
@@ -841,35 +902,18 @@ export function apply(ctx, config = {}) {
     },
     output,
     async execute(args, exec) {
-      const task = String(args.task ?? '').trim()
-      if (!task) return textResult('ERROR: task 不能为空')
-      const resolved = resolveEngine(args.engine, config)
-      if (resolved.error) return textResult(`ERROR: ${resolved.error}`)
-      const engine = resolved.engine.name
-      const title = args.label || task.split('\n')[0].slice(0, 60)
-      const id = randomUUID().replaceAll('-', '').slice(0, 12)
-      const dir = jobDir(id)
-      mkdirSync(dir, { recursive: true })
-      const taskFile = join(dir, 'task.txt')
-      writeFileSync(taskFile, task)
-      const command = resolved.build(taskFile, title)
-      const { job, error } = await dispatch({
-        kind: 'agent',
-        id,
-        dir,
-        command,
+      const started = await startAgentTask({
+        task: args.task,
+        engine: args.engine,
+        label: args.label,
         cwd: args.cwd,
-        label: title,
         runtimeMaxSec: runtimeMax(args.runtime_max_sec),
+        agent: exec?.agent,
       })
-      if (error) return textResult(`ERROR: 投递失败（${error}）\n目录：${dir}`)
-      const sessionId = sessionKey(exec?.agent) ?? null
-      if (sessionId) {
-        agents.set(sessionId, exec.agent)
-        patchJob(job.id, { sessionId, engine })
-      }
+      if (started.error) return textResult(`ERROR: ${started.error}`)
+      const { job, resolved, taskFile } = started
       return textResult([
-        `已交给 ${resolved.engine.label}（${engine}${resolved.engine.version ? ' · ' + resolved.engine.version : ''}）：${job.id}`,
+        `已交给 ${resolved.engine.label}（${resolved.engine.name}${resolved.engine.version ? ' · ' + resolved.engine.version : ''}）：${job.id}`,
         `任务文件：${taskFile}`,
         `日志：${job.logPath}`,
         '它在本机独立 cgroup 里跑，不受 dsh 重启影响；跑完会把结果送回这个会话。',

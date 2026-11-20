@@ -14,6 +14,11 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
+    // Whether the '/' source reached the composer. Reported in the panel footer
+    // because "nothing showed up when I typed /" has many causes, and this turns
+    // the most common one from a guess into a line of text.
+    let triggerState = 'n/a'
+
     const PANEL_ID = 'outlive-jobs'
     const POLL_MS = 3000
     const LOG_POLL_MS = 2000
@@ -211,6 +216,8 @@ window.__ModuleLoader__.load({
       const [command, setCommand] = useState('')
       const [label, setLabel] = useState('')
       const [posting, setPosting] = useState(false)
+      // 'run' = a shell command; 'agent' = a task description for a coding agent.
+      const [mode, setMode] = useState('run')
       const busy = useRef(false)
 
       const load = useCallback(async () => {
@@ -260,6 +267,7 @@ window.__ModuleLoader__.load({
         setNotice('')
         try {
           const started = await postJson('/__outlive/run', {
+            kind: task.kind || 'run',
             command: task.command,
             label: task.label,
             cwd: task.cwd || undefined,
@@ -287,12 +295,13 @@ window.__ModuleLoader__.load({
         setPosting(true)
         setNotice('')
         try {
-          const saved = await postJson('/__outlive/tasks', { command: text, label: label.trim() })
+          const saved = await postJson('/__outlive/tasks', { kind: mode, command: text, label: label.trim() })
           setTasks(saved.tasks || [])
           setCommand('')
           setLabel('')
           if (alsoRun) {
             const started = await postJson('/__outlive/run', {
+              kind: mode,
               command: text,
               label: saved.task ? saved.task.label : undefined,
               taskId: saved.task ? saved.task.id : undefined,
@@ -307,7 +316,7 @@ window.__ModuleLoader__.load({
         } finally {
           setPosting(false)
         }
-      }, [command, label, load])
+      }, [command, label, mode, load])
 
       const jobs = data.jobs || []
       const running = useMemo(() => jobs.filter((job) => job.status === 'running').length, [jobs])
@@ -373,19 +382,36 @@ window.__ModuleLoader__.load({
                 style: { ...styles.taskItem, ...(index === 0 ? styles.itemFirst : {}) },
               },
               h('div', { style: styles.taskMain },
-                h('div', { style: styles.label }, task.label),
+                h('div', { style: styles.label },
+                  task.kind === 'agent' ? h('span', { style: styles.chip }, 'agent') : null,
+                  task.label),
                 h('div', { style: { ...styles.badge, ...styles.code, opacity: 0.6 } }, task.command.length > 90 ? `${task.command.slice(0, 90)}…` : task.command)),
               h('div', { style: styles.row },
                 h('button', { style: styles.btn, onClick: () => void runTask(task) }, '运行'),
                 h('button', { style: styles.btnGhost, onClick: () => void forgetTask(task) }, '删除')))))),
 
-        // create: one command, optionally remembered
+        // create: one shell command, or one task description for an agent —
+        // same box, because from here the difference is just who does the work
         h('div', { style: styles.section },
-          h('div', { style: styles.sectionHead }, h('span', { style: styles.sectionTitle }, '新建任务')),
+          h('div', { style: styles.sectionHead },
+            h('span', { style: styles.sectionTitle }, '新建'),
+            h('div', { style: styles.row },
+              h('button', {
+                style: { ...styles.btn, ...(mode === 'run' ? styles.btnOn : {}) },
+                onClick: () => setMode('run'),
+                title: '在会话之外的 systemd unit 里跑一条 shell 命令',
+              }, '命令'),
+              h('button', {
+                style: { ...styles.btn, ...(mode === 'agent' ? styles.btnOn : {}) },
+                onClick: () => setMode('agent'),
+                title: '把一整件任务交给本机的编码 agent（opencode / codex / claude）',
+              }, '交给 agent'))),
           h('textarea', {
             style: styles.textarea,
             rows: 3,
-            placeholder: '要跑的命令（bash 语义，在会话之外的 systemd unit 里执行）',
+            placeholder: mode === 'agent'
+              ? '要做的事，用人话写清背景、路径和验收标准（对方看不到这段对话）'
+              : '要跑的命令（bash 语义，在会话之外的 systemd unit 里执行）',
             value: command,
             onChange: (event) => setCommand(event.currentTarget.value),
           }),
@@ -434,6 +460,10 @@ window.__ModuleLoader__.load({
               h('span', null, open.cwd || ''),
               h('span', null, open.finishedAt ? `结束于 ${ago(open.finishedAt)}` : '还在跑')),
             open.error ? h('div', { style: styles.hint }, open.error) : null,
+            open.exitCode === 127
+              ? h('div', { style: styles.hint },
+                '127 是「命令不存在」：这条更像一句人话而不是命令——用「交给 agent」模式，让它自己去想怎么做。')
+              : null,
             h(LogView, { id: open.id, running: open.status === 'running' }))
           : null,
         h('div', { style: styles.hint },
@@ -441,7 +471,9 @@ window.__ModuleLoader__.load({
           h('br'),
           '想让我去投，直接在对话里说；输入 ',
           h('span', { style: styles.code }, '/'),
-          ' 也能选到常用任务。'),
+          ' 也能选到常用任务。',
+          h('br'),
+          h('span', { style: styles.meta }, `输入框触发源：${triggerState}`)),
       )
     }
 
@@ -476,32 +508,72 @@ window.__ModuleLoader__.load({
         // composer the same way a skill is: type '/', pick a row, and the
         // command lands in the draft. Picking never runs anything by itself —
         // the draft is still the user's to send.
+        // Two fixed rows so the group is never empty (an empty candidate
+        // list looks exactly like "the plugin is not loaded"), then whatever
+        // the user chose to remember. Names are ASCII on purpose: `/out` has to
+        // find them with an English keyboard.
+        const FIXED = [
+          {
+            name: 'outlive run',
+            description: '投递一条 shell 命令：在会话之外的 systemd unit 里跑',
+            role: 'run',
+          },
+          {
+            name: 'outlive agent',
+            description: '把一整件任务交给本机的编码 agent（opencode / codex / claude）',
+            role: 'agent',
+          },
+        ]
+
         const source = {
           trigger: '/',
           name: 'outlive',
           order: 30,
           async candidates(session, { query, signal }) {
-            const data = await readJson('/__outlive/tasks', signal).catch(() => ({ tasks: [] }))
             const needle = String(query || '').trim().toLowerCase()
-            return (data.tasks || [])
-              .filter((task) => !needle
-                || `${task.label} ${task.command}`.toLowerCase().includes(needle))
+            const hit = (text) => !needle || String(text).toLowerCase().includes(needle)
+            const data = await readJson('/__outlive/tasks', signal).catch(() => ({ tasks: [] }))
+            const tasks = (data.tasks || [])
+              .filter((task) => hit(`${task.label} ${task.command}`))
               .map((task) => ({
-                name: task.label,
+                name: `outlive · ${task.label}`,
                 description: task.command.length > 80 ? `${task.command.slice(0, 80)}…` : task.command,
                 value: task.command,
+                role: task.kind === 'agent' ? 'agent' : 'run',
+                saved: true,
               }))
+            return [
+              ...FIXED.filter((row) => hit(`${row.name} ${row.description}`)),
+              ...tasks,
+            ]
           },
           onPick({ candidate }) {
-            return { text: `用 outlive 跑这条命令（在会话之外的 systemd unit 里执行）：\n${candidate.value}` }
+            const role = candidate && candidate.role
+            if (role === 'agent' && !candidate.saved) {
+              return { text: '用 outlive 把这件事交给离场的编码 agent 去做（在会话之外，跑完会把结果送回这个会话）：\n' }
+            }
+            if (role === 'run' && !candidate.saved) {
+              return { text: '用 outlive 投递这条命令（在会话之外的 systemd unit 里执行）：\n' }
+            }
+            const value = (candidate && candidate.value) || ''
+            return {
+              text: role === 'agent'
+                ? `用 outlive 把这件事交给离场的编码 agent 去做（在会话之外，跑完会把结果送回这个会话）：\n${value}`
+                : `用 outlive 投递这条命令（在会话之外的 systemd unit 里执行）：\n${value}`,
+            }
           },
         }
 
         const attach = (triggers) => {
-          if (!triggers || typeof triggers.registerSource !== 'function') return
+          if (!triggers || typeof triggers.registerSource !== 'function') {
+            triggerState = 'missing'
+            return
+          }
           try {
             ctx.effect(() => triggers.registerSource(source))
+            triggerState = 'ok'
           } catch (err) {
+            triggerState = `error: ${err && err.message ? err.message : err}`
             console.error('[outlive] 注册 / 触发源失败:', err)
           }
         }
@@ -513,6 +585,7 @@ window.__ModuleLoader__.load({
             ctx.inject(['inputTriggers'], (scope) => attach(scope.get('inputTriggers')))
           }
         } catch (err) {
+          triggerState = `error: ${err && err.message ? err.message : err}`
           console.error('[outlive] 拿不到 inputTriggers:', err)
         }
       },
