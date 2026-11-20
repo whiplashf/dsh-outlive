@@ -48,7 +48,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --test test/*.test.mjs",
     "check": "node --check index.js && node --check client.js && node --check lib/store.js && node --check lib/agents.js && node --check lib/dispatch.js && node --check lib/restart.js && node --check lib/fsbrowse.js && node --check lib/notify.js"
   },
   "dsh": {
