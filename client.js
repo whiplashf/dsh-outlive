@@ -34,7 +34,6 @@ window.__ModuleLoader__.load({
       'compose.title': 'New job',
       'compose.tab.agent': 'Agent',
       'compose.tab.command': 'Command',
-      'compose.tab.restart': 'Restart DSH',
       'compose.agent': 'Agent',
       'compose.agent.auto': 'Default ({name})',
       'compose.agent.none': 'Default (none ready)',
@@ -54,13 +53,6 @@ window.__ModuleLoader__.load({
       'compose.run': 'Run in background',
       'compose.save': 'Save as task',
       'compose.hint': 'Runs in a detached systemd unit. Closing this page or restarting DSH does not stop it.',
-      'compose.restart.title': 'Restart DSH Web',
-      'compose.restart.body': 'The restart runs outside this page. The page reconnects when the server is back.',
-      'compose.restart.plan': 'Plan',
-      'compose.restart.unitMode': 'Unit mode — systemd restarts {unit}.',
-      'compose.restart.processMode': 'Process mode — the process is terminated and relaunched in a detached unit.',
-      'compose.restart.ports': 'Health check: port {ports}',
-      'compose.restart.unknown': 'The restart plan is available when the job is submitted.',
       'jobs.title': 'Jobs',
       'jobs.empty': 'No jobs yet.',
       'jobs.emptyFiltered': 'No jobs in this view.',
@@ -75,14 +67,12 @@ window.__ModuleLoader__.load({
       'jobs.agent': 'Agent',
       'jobs.kind.agent': 'Agent',
       'jobs.kind.command': 'Command',
-      'jobs.kind.restart': 'Restart',
       'job.cwd': 'Working directory',
       'job.command': 'Command',
       'job.log': 'Log',
       'job.exit': 'Exit code',
       'job.started': 'Started',
       'job.finished': 'Finished',
-      'job.mode': 'Mode',
       'job.cancel': 'Cancel job',
       'job.delete': 'Delete record',
       'job.confirmDelete': 'Delete this record? The log is removed.',
@@ -90,11 +80,8 @@ window.__ModuleLoader__.load({
       'job.logTruncated': 'Showing the last 300 lines.',
       'tasks.title': 'Saved tasks',
       'tasks.empty': 'Saved tasks appear here.',
-      'tasks.builtin': 'Built-in',
       'tasks.run': 'Run',
       'tasks.delete': 'Delete',
-      'tasks.restore': 'Restore built-in task',
-      'tasks.removed': 'The built-in task was removed.',
       'agents.title': 'Agents',
       'agents.manage': 'Manage agents',
       'agents.default': 'Default: {name}',
@@ -122,9 +109,6 @@ window.__ModuleLoader__.load({
       'settings.notDetected': 'Presets',
       'settings.stateDir': 'State directory',
       'settings.version': 'Version',
-      'settings.builtin': 'Built-in task',
-      'settings.builtin.removed': 'Removed',
-      'settings.restore': 'Restore',
       'settings.added': 'Agent saved.',
       'settings.removed': 'Agent removed.',
       'dialog.agent.title': 'Choose agent executable',
@@ -166,7 +150,6 @@ window.__ModuleLoader__.load({
       'error.binNotExecutable': 'That file is not executable.',
       'error.argsMissingFile': 'The argument template must include {file}.',
       'notice.cancelled': 'Job cancelled.',
-      'notice.restored': 'Built-in task restored.',
       'notice.cleared': 'Finished records deleted.',
       'time.justNow': 'just now',
       'time.seconds': '{n}s ago',
@@ -200,7 +183,6 @@ window.__ModuleLoader__.load({
       'compose.title': '新建任务',
       'compose.tab.agent': 'Agent',
       'compose.tab.command': '命令',
-      'compose.tab.restart': '重启 DSH',
       'compose.agent': 'Agent',
       'compose.agent.auto': '默认（{name}）',
       'compose.agent.none': '默认（无可用 Agent）',
@@ -220,13 +202,6 @@ window.__ModuleLoader__.load({
       'compose.run': '后台运行',
       'compose.save': '保存为常用任务',
       'compose.hint': '任务在独立的 systemd unit 中运行。关闭页面或重启 DSH 都不会中断。',
-      'compose.restart.title': '重启 DSH Web',
-      'compose.restart.body': '重启在本页之外执行；服务恢复后页面会自动重连。',
-      'compose.restart.plan': '执行计划',
-      'compose.restart.unitMode': 'Unit 模式 —— 由 systemd 重启 {unit}。',
-      'compose.restart.processMode': '进程模式 —— 结束当前进程，并在独立 unit 中重新拉起。',
-      'compose.restart.ports': '健康检查：端口 {ports}',
-      'compose.restart.unknown': '提交任务时才能确定执行计划。',
       'jobs.title': '任务',
       'jobs.empty': '还没有任务。',
       'jobs.emptyFiltered': '当前视图没有任务。',
@@ -241,14 +216,12 @@ window.__ModuleLoader__.load({
       'jobs.agent': 'Agent',
       'jobs.kind.agent': 'Agent',
       'jobs.kind.command': '命令',
-      'jobs.kind.restart': '重启',
       'job.cwd': '工作目录',
       'job.command': '命令',
       'job.log': '日志',
       'job.exit': '退出码',
       'job.started': '开始',
       'job.finished': '结束',
-      'job.mode': '模式',
       'job.cancel': '中止任务',
       'job.delete': '删除记录',
       'job.confirmDelete': '删除这条记录？日志会一起删除。',
@@ -256,11 +229,8 @@ window.__ModuleLoader__.load({
       'job.logTruncated': '仅显示最后 300 行。',
       'tasks.title': '常用任务',
       'tasks.empty': '保存的任务会出现在这里。',
-      'tasks.builtin': '内置',
       'tasks.run': '运行',
       'tasks.delete': '删除',
-      'tasks.restore': '恢复内置任务',
-      'tasks.removed': '内置任务已被删除。',
       'agents.title': 'Agent',
       'agents.manage': '管理 Agent',
       'agents.default': '默认：{name}',
@@ -288,9 +258,6 @@ window.__ModuleLoader__.load({
       'settings.notDetected': '预设',
       'settings.stateDir': '状态目录',
       'settings.version': '版本',
-      'settings.builtin': '内置任务',
-      'settings.builtin.removed': '已删除',
-      'settings.restore': '恢复',
       'settings.added': 'Agent 已保存。',
       'settings.removed': 'Agent 已移除。',
       'dialog.agent.title': '选择 Agent 可执行文件',
@@ -332,7 +299,6 @@ window.__ModuleLoader__.load({
       'error.binNotExecutable': '该文件不可执行。',
       'error.argsMissingFile': '参数模板必须包含 {file}。',
       'notice.cancelled': '任务已中止。',
-      'notice.restored': '内置任务已恢复。',
       'notice.cleared': '已清理结束记录。',
       'time.justNow': '刚刚',
       'time.seconds': '{n} 秒前',
@@ -353,13 +319,13 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = `
-      .outlive-page{width:100%;max-width:1120px;margin:0 auto;padding:28px 24px 56px;box-sizing:border-box;color:inherit;font-size:13px;line-height:1.5}
+      .outlive-page{width:100%;max-width:1120px;flex:1 1 auto;height:100%;min-height:0;margin:0 auto;padding:28px 24px 56px;box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;color:inherit;font-size:13px;line-height:1.5}
       .outlive-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
       .outlive-title{margin:0;font-size:22px;font-weight:640;letter-spacing:-.015em;line-height:1.2}
       .outlive-subtitle{margin:4px 0 0;opacity:.62;font-size:13px}
       .outlive-header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
       .outlive-running{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid color-mix(in oklab,currentColor 16%,transparent);font-size:12px;opacity:.8}
-      .outlive-running::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--dsh-accent,#4f8cff);box-shadow:0 0 0 3px color-mix(in oklab,var(--dsh-accent,#4f8cff) 18%,transparent)}
+      .outlive-running::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-business-primary,#4f8cff);box-shadow:0 0 0 3px color-mix(in oklab,var(--dsw-alias-state-business-primary,#4f8cff) 18%,transparent)}
       .outlive-grid{display:grid;grid-template-columns:minmax(0,1fr) 344px;gap:20px;margin-top:24px;align-items:start}
       @media (max-width:980px){.outlive-grid{grid-template-columns:1fr}.outlive-side{order:3}}
       .outlive-main{display:flex;flex-direction:column;gap:20px;min-width:0}
@@ -375,7 +341,7 @@ window.__ModuleLoader__.load({
       .outlive-field{display:flex;flex-direction:column;gap:6px;min-width:0}
       .outlive-label{font-size:12px;font-weight:560;opacity:.78}
       .outlive-input,.outlive-select,.outlive-textarea{width:100%;box-sizing:border-box;border:1px solid color-mix(in oklab,currentColor 16%,transparent);border-radius:9px;background:color-mix(in oklab,currentColor 3%,transparent);color:inherit;font:inherit;font-size:13px;padding:8px 10px;outline:none}
-      .outlive-input:focus,.outlive-select:focus,.outlive-textarea:focus{border-color:color-mix(in oklab,var(--dsh-accent,#4f8cff) 60%,transparent);box-shadow:0 0 0 3px color-mix(in oklab,var(--dsh-accent,#4f8cff) 14%,transparent)}
+      .outlive-input:focus,.outlive-select:focus,.outlive-textarea:focus{border-color:color-mix(in oklab,var(--dsw-alias-state-business-primary,#4f8cff) 60%,transparent);box-shadow:0 0 0 3px color-mix(in oklab,var(--dsw-alias-state-business-primary,#4f8cff) 14%,transparent)}
       .outlive-textarea{resize:vertical;min-height:116px;line-height:1.55}
       .outlive-textarea.mono,.outlive-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
       .outlive-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
@@ -388,23 +354,23 @@ window.__ModuleLoader__.load({
       .outlive-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid color-mix(in oklab,currentColor 18%,transparent);background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:540;padding:7px 12px;border-radius:9px;cursor:pointer;white-space:nowrap;line-height:1.3}
       .outlive-btn:hover{background:color-mix(in oklab,currentColor 7%,transparent)}
       .outlive-btn:disabled{opacity:.45;cursor:not-allowed}
-      .outlive-btn.primary{background:var(--dsh-accent,#4f8cff);border-color:transparent;color:#fff}
+      .outlive-btn.primary{background:var(--dsw-alias-state-business-primary,#4f8cff);border-color:transparent;color:var(--dsw-alias-label-on-color,#fff)}
       .outlive-btn.primary:hover{filter:brightness(1.06)}
-      .outlive-btn.danger{color:#e5484d;border-color:color-mix(in oklab,#e5484d 40%,transparent)}
+      .outlive-btn.danger{color:var(--dsw-alias-state-error-primary,#e5484d);border-color:color-mix(in oklab,var(--dsw-alias-state-error-primary,#e5484d) 40%,transparent)}
       .outlive-btn.ghost{border-color:transparent}
       .outlive-btn.small{padding:4px 9px;font-size:11px}
       .outlive-icon-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;border:1px solid transparent;background:transparent;color:inherit;cursor:pointer}
       .outlive-icon-btn:hover{background:color-mix(in oklab,currentColor 8%,transparent);border-color:color-mix(in oklab,currentColor 12%,transparent)}
-      .outlive-btn:focus-visible,.outlive-icon-btn:focus-visible,.outlive-tab:focus-visible,.outlive-input:focus-visible,.outlive-select:focus-visible,.outlive-textarea:focus-visible,.outlive-fs-row:focus-visible{outline:2px solid var(--dsh-accent,#4f8cff);outline-offset:2px}
+      .outlive-btn:focus-visible,.outlive-icon-btn:focus-visible,.outlive-tab:focus-visible,.outlive-input:focus-visible,.outlive-select:focus-visible,.outlive-textarea:focus-visible,.outlive-fs-row:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#4f8cff);outline-offset:2px}
       .outlive-pill{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:560;border:1px solid transparent;white-space:nowrap}
       .outlive-pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
-      .outlive-pill.running{color:var(--dsh-accent,#4f8cff);border-color:color-mix(in oklab,var(--dsh-accent,#4f8cff) 34%,transparent);background:color-mix(in oklab,var(--dsh-accent,#4f8cff) 9%,transparent)}
-      .outlive-pill.completed{color:#2f9e44;border-color:color-mix(in oklab,#2f9e44 32%,transparent);background:color-mix(in oklab,#2f9e44 9%,transparent)}
-      .outlive-pill.failed{color:#e5484d;border-color:color-mix(in oklab,#e5484d 32%,transparent);background:color-mix(in oklab,#e5484d 9%,transparent)}
+      .outlive-pill.running{color:var(--dsw-alias-state-business-primary,#4f8cff);border-color:color-mix(in oklab,var(--dsw-alias-state-business-primary,#4f8cff) 34%,transparent);background:color-mix(in oklab,var(--dsw-alias-state-business-primary,#4f8cff) 9%,transparent)}
+      .outlive-pill.completed{color:var(--dsw-alias-state-success-primary,#2f9e44);border-color:color-mix(in oklab,var(--dsw-alias-state-success-primary,#2f9e44) 32%,transparent);background:color-mix(in oklab,var(--dsw-alias-state-success-primary,#2f9e44) 9%,transparent)}
+      .outlive-pill.failed{color:var(--dsw-alias-state-error-primary,#e5484d);border-color:color-mix(in oklab,var(--dsw-alias-state-error-primary,#e5484d) 32%,transparent);background:color-mix(in oklab,var(--dsw-alias-state-error-primary,#e5484d) 9%,transparent)}
       .outlive-pill.cancelled{color:color-mix(in oklab,currentColor 62%,transparent);border-color:color-mix(in oklab,currentColor 18%,transparent)}
       .outlive-badge{display:inline-flex;align-items:center;border-radius:6px;padding:1px 6px;font-size:10px;font-weight:600;letter-spacing:.01em;border:1px solid color-mix(in oklab,currentColor 18%,transparent);opacity:.82;white-space:nowrap}
-      .outlive-badge.accent{color:var(--dsh-accent,#4f8cff);border-color:color-mix(in oklab,var(--dsh-accent,#4f8cff) 34%,transparent)}
-      .outlive-badge.warn{color:#c47d00;border-color:color-mix(in oklab,#c47d00 34%,transparent)}
+      .outlive-badge.accent{color:var(--dsw-alias-state-business-primary,#4f8cff);border-color:color-mix(in oklab,var(--dsw-alias-state-business-primary,#4f8cff) 34%,transparent)}
+      .outlive-badge.warn{color:var(--dsw-alias-state-warn-label,#c47d00);border-color:color-mix(in oklab,var(--dsw-alias-state-warn-label,#c47d00) 34%,transparent)}
       .outlive-jobs{display:flex;flex-direction:column;gap:2px}
       .outlive-job{border-radius:10px;border:1px solid transparent}
       .outlive-job+.outlive-job{border-top-color:color-mix(in oklab,currentColor 8%,transparent);border-radius:0}
@@ -422,7 +388,7 @@ window.__ModuleLoader__.load({
       .outlive-kv dt{opacity:.58}
       .outlive-kv dd{margin:0;overflow-wrap:anywhere}
       .outlive-pre{margin:0;padding:10px 12px;border-radius:9px;background:color-mix(in oklab,currentColor 4%,transparent);border:1px solid color-mix(in oklab,currentColor 9%,transparent);max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.5}
-      .outlive-pre.tall{max-height:340px}
+      .outlive-pre.tall{max-height:min(60vh,560px)}
       .outlive-emptystate{border:1px dashed color-mix(in oklab,currentColor 16%,transparent);border-radius:10px;padding:18px;text-align:center;font-size:12px;opacity:.62}
       .outlive-task{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid color-mix(in oklab,currentColor 8%,transparent)}
       .outlive-task:first-child{border-top:0}
@@ -435,13 +401,10 @@ window.__ModuleLoader__.load({
       .outlive-agent-name{font-size:12px;font-weight:560;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
       .outlive-agent-path{font-size:10.5px;opacity:.52;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
       .outlive-agent-args{font-size:10.5px;opacity:.62;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-      .outlive-plan{display:flex;flex-direction:column;gap:6px;font-size:12px}
-      .outlive-plan-line{display:flex;gap:8px;align-items:baseline}
-      .outlive-plan-line b{font-weight:560;opacity:.7;min-width:52px}
       .outlive-notice{display:flex;align-items:flex-start;gap:8px;border-radius:9px;padding:8px 10px;font-size:12px;border:1px solid color-mix(in oklab,currentColor 14%,transparent);background:color-mix(in oklab,currentColor 3%,transparent)}
-      .outlive-notice.error{color:#e5484d;border-color:color-mix(in oklab,#e5484d 34%,transparent);background:color-mix(in oklab,#e5484d 7%,transparent)}
-      .outlive-overlay{position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;padding:24px;background:color-mix(in oklab,#000 42%,transparent)}
-      .outlive-dialog{width:min(760px,100%);max-height:min(720px,88vh);display:flex;flex-direction:column;border-radius:14px;border:1px solid color-mix(in oklab,currentColor 16%,transparent);background:color-mix(in oklab,currentColor 7%,transparent);backdrop-filter:blur(18px);color:inherit;box-shadow:0 24px 80px rgba(0,0,0,.4);overflow:hidden}
+      .outlive-notice.error{color:var(--dsw-alias-state-error-primary,#e5484d);border-color:color-mix(in oklab,var(--dsw-alias-state-error-primary,#e5484d) 34%,transparent);background:color-mix(in oklab,var(--dsw-alias-state-error-primary,#e5484d) 7%,transparent)}
+      .outlive-overlay{position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-mask-3,color-mix(in oklab,#000 42%,transparent))}
+      .outlive-dialog{width:min(760px,100%);max-height:min(720px,88vh);display:flex;flex-direction:column;border-radius:14px;border:1px solid color-mix(in oklab,currentColor 16%,transparent);background:color-mix(in oklab,currentColor 7%,transparent);backdrop-filter:blur(18px);color:inherit;box-shadow:var(--dsw-elevation-prominent,0 24px 80px rgba(0,0,0,.4));overflow:hidden}
       .outlive-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid color-mix(in oklab,currentColor 10%,transparent)}
       .outlive-dialog-body{display:grid;grid-template-columns:180px minmax(0,1fr);min-height:0;flex:1}
       @media (max-width:640px){.outlive-dialog-body{grid-template-columns:1fr}.outlive-fs-places{display:none}}
@@ -458,12 +421,12 @@ window.__ModuleLoader__.load({
       .outlive-fs-list{flex:1;overflow:auto;min-height:220px;max-height:46vh;padding:6px}
       .outlive-fs-row{display:flex;align-items:center;gap:9px;width:100%;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;padding:7px 9px;border-radius:8px;cursor:pointer}
       .outlive-fs-row:hover{background:color-mix(in oklab,currentColor 6%,transparent)}
-      .outlive-fs-row.selected{background:color-mix(in oklab,var(--dsh-accent,#4f8cff) 14%,transparent)}
+      .outlive-fs-row.selected{background:color-mix(in oklab,var(--dsw-alias-state-business-primary,#4f8cff) 14%,transparent)}
       .outlive-fs-row:disabled{opacity:.4;cursor:default}
       .outlive-fs-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       .outlive-fs-kind{font-size:10px;opacity:.42}
       .outlive-dialog-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;border-top:1px solid color-mix(in oklab,currentColor 10%,transparent);flex-wrap:wrap}
-      .outlive-drawer{position:fixed;top:0;right:0;bottom:0;z-index:80;width:min(460px,100%);background:color-mix(in oklab,currentColor 7%,transparent);backdrop-filter:blur(18px);color:inherit;border-left:1px solid color-mix(in oklab,currentColor 14%,transparent);box-shadow:-20px 0 60px rgba(0,0,0,.28);display:flex;flex-direction:column}
+      .outlive-drawer{position:fixed;top:0;right:0;bottom:0;z-index:80;width:min(460px,100%);background:color-mix(in oklab,currentColor 7%,transparent);backdrop-filter:blur(18px);color:inherit;border-left:1px solid color-mix(in oklab,currentColor 14%,transparent);box-shadow:var(--dsw-elevation-panel,-20px 0 60px rgba(0,0,0,.28));display:flex;flex-direction:column}
       .outlive-drawer-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid color-mix(in oklab,currentColor 10%,transparent)}
       .outlive-drawer-body{padding:16px 18px 28px;overflow:auto;display:flex;flex-direction:column;gap:18px}
       .outlive-section-title{font-size:11px;text-transform:uppercase;letter-spacing:.07em;opacity:.5;margin:0 0 8px}
@@ -496,18 +459,25 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function OutliveIcon(props) {
+    function OutliveIcon({ size = 20, active = false }) {
       return h(
         'svg',
-        { width: 20, height: 20, viewBox: '0 0 24 24', 'aria-hidden': 'true', focusable: 'false', ...props },
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 24 24',
+          'aria-hidden': 'true',
+          focusable: 'false',
+          style: active ? { opacity: 1 } : { opacity: 0.72 },
+        },
         h('path', {
           d: 'M3 11.5 21 3l-8.5 18-2.4-7.1L3 11.5Z',
           fill: 'none',
           stroke: 'currentColor',
-          strokeWidth: 1.6,
+          strokeWidth: active ? 1.9 : 1.6,
           strokeLinejoin: 'round',
         }),
-        h('path', { d: 'M10.1 13.9 21 3', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
+        h('path', { d: 'M10.1 13.9 21 3', fill: 'none', stroke: 'currentColor', strokeWidth: active ? 1.9 : 1.6, strokeLinecap: 'round' }),
       )
     }
 
@@ -810,24 +780,10 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const restore = async () => {
-        setBusy(true)
-        try {
-          await request('/api/outlive/tasks/restore', { method: 'POST', body: { key: 'restart-dsh' } })
-          notify(t('notice.restored'), 'ok')
-          onChanged()
-        } catch (err) {
-          setError(errorMessage(t, err))
-        } finally {
-          setBusy(false)
-        }
-      }
-
       const configure = (agent) => {
         setForm({ name: agent.name, label: agent.label || agent.name, bin: agent.bin || '', args: agent.args || '' })
       }
 
-      const removedBuiltin = (data?.builtins?.removed || []).includes('restart-dsh')
 
       return h(
         Fragment,
@@ -951,19 +907,6 @@ window.__ModuleLoader__.load({
             h(
               'section',
               null,
-              h('h3', { className: 'outlive-section-title' }, t('settings.builtin')),
-              removedBuiltin
-                ? h(
-                    'div',
-                    { className: 'outlive-actions' },
-                    h('span', { className: 'outlive-hint' }, t('tasks.removed')),
-                    h('button', { type: 'button', className: 'outlive-btn', disabled: busy, onClick: restore }, t('settings.restore')),
-                  )
-                : h('p', { className: 'outlive-hint' }, t('compose.restart.title')),
-            ),
-            h(
-              'section',
-              null,
               h('h3', { className: 'outlive-section-title' }, 'Info'),
               h('dl', { className: 'outlive-kv' },
                 h('dt', null, t('settings.stateDir')),
@@ -1025,8 +968,6 @@ window.__ModuleLoader__.load({
           h('dd', { className: 'outlive-mono' }, job.command || '—'),
           job.cwd ? h('dt', null, t('job.cwd')) : null,
           job.cwd ? h('dd', { className: 'outlive-mono' }, job.cwd) : null,
-          job.kind === 'restart' ? h('dt', null, t('job.mode')) : null,
-          job.kind === 'restart' ? h('dd', null, job.mode || '—') : null,
           job.exitCode !== null ? h('dt', null, t('job.exit')) : null,
           job.exitCode !== null ? h('dd', null, String(job.exitCode)) : null,
           job.error ? h('dt', null, 'Error') : null,
@@ -1060,24 +1001,9 @@ window.__ModuleLoader__.load({
       const [runtime, setRuntime] = useState(7200)
       const [preview, setPreview] = useState(null)
       const [previewOpen, setPreviewOpen] = useState(false)
-      const [plan, setPlan] = useState(null)
-      const [planOpen, setPlanOpen] = useState(false)
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(null)
       const [dialog, setDialog] = useState(false)
-
-      const loadPlan = useCallback(async () => {
-        try {
-          const result = await request('/api/outlive/preview', { method: 'POST', body: { kind: 'restart' } })
-          setPlan(result)
-        } catch {
-          setPlan(null)
-        }
-      }, [])
-
-      useEffect(() => {
-        if (tab === 'restart') loadPlan()
-      }, [tab, loadPlan])
 
       const showPreview = async () => {
         if (previewOpen) {
@@ -1119,16 +1045,6 @@ window.__ModuleLoader__.load({
             onChanged()
             return
           }
-          if (tab === 'restart') {
-            const result = await request('/api/outlive/run', { method: 'POST', body: { kind: 'restart', lang } })
-            if (result.error) {
-              setError(errorMessage(t, asError(result)))
-            } else {
-              notify(t('notice.started', { id: result.job.id }), 'ok')
-              onChanged()
-            }
-            return
-          }
           const body =
             tab === 'command'
               ? { kind: 'command', command, label, cwd, runtime_max_sec: runtime, lang }
@@ -1149,8 +1065,8 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const canRun = tab === 'restart' ? true : tab === 'command' ? command.trim().length > 0 : task.trim().length > 0
-      const canSave = tab !== 'restart' && canRun
+      const canRun = tab === 'command' ? command.trim().length > 0 : task.trim().length > 0
+      const canSave = canRun
 
       return h(
         'section',
@@ -1162,7 +1078,7 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'outlive-tabs', role: 'tablist' },
-            ['agent', 'command', 'restart'].map((name) =>
+            ['agent', 'command'].map((name) =>
               h(
                 'button',
                 {
@@ -1183,28 +1099,7 @@ window.__ModuleLoader__.load({
           ),
         ),
         error ? h(Notice, { notice: { kind: 'error', text: error }, onClose: () => setError(null) }) : null,
-        tab === 'restart'
-          ? h(
-              'div',
-              { className: 'outlive-compose' },
-              h('p', { className: 'outlive-hint' }, t('compose.restart.body')),
-              h(
-                'div',
-                { className: 'outlive-plan' },
-                h('div', { className: 'outlive-plan-line' }, h('b', null, t('compose.restart.plan')), h('span', null, plan ? (plan.mode === 'unit' ? t('compose.restart.unitMode', { unit: plan.unit }) : t('compose.restart.processMode')) : t('compose.restart.unknown'))),
-                plan?.ports?.length ? h('div', { className: 'outlive-plan-line' }, h('b', null, ''), h('span', { className: 'outlive-hint' }, t('compose.restart.ports', { ports: plan.ports.join(', ') }))) : null,
-              ),
-              h(
-                'div',
-                { className: 'outlive-actions' },
-                h('button', { type: 'button', className: 'outlive-btn primary', disabled: busy, onClick: () => submit(false) }, busy ? h('span', { className: 'outlive-spin' }) : h(Icon, { name: 'refresh', size: 13 }), t('compose.tab.restart')),
-                h('button', { type: 'button', className: 'outlive-btn ghost', onClick: () => setPlanOpen((value) => !value) }, planOpen ? t('compose.preview.hide') : t('compose.preview')),
-              ),
-              planOpen
-                ? h('div', null, h('div', { className: 'outlive-label', style: { marginBottom: 6 } }, t('job.command')), h('pre', { className: 'outlive-pre' }, plan?.command || t('compose.restart.unknown')))
-                : null,
-            )
-          : h(
+h(
               'div',
               { className: 'outlive-compose' },
               h(
@@ -1363,10 +1258,10 @@ window.__ModuleLoader__.load({
                       h(
                         'span',
                         { style: { minWidth: 0 } },
-                        h('div', { className: 'outlive-job-label' }, job.label || (job.kind === 'restart' ? t('compose.restart.title') : job.command || job.id)),
+                        h('div', { className: 'outlive-job-label' }, job.label || job.command || job.id),
                         h('div', { className: 'outlive-job-meta' }, `${t(`jobs.kind.${job.kind}`)} · ${formatAgo(job.startedAt, t)}`),
                       ),
-                      h('span', { className: 'outlive-job-agent col-agent' }, job.agent || (job.kind === 'restart' ? job.mode || '—' : t('jobs.kind.command'))),
+                      h('span', { className: 'outlive-job-agent col-agent' }, job.agent || t('jobs.kind.command')),
                       h('span', { className: 'outlive-job-time col-time' }, formatDuration(job.startedAt, job.finishedAt)),
                       h('span', { className: 'outlive-chevron', 'aria-hidden': 'true' }, openId === job.id ? '▾' : '▸'),
                     ),
@@ -1386,26 +1281,11 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function MainPage({ t, lang, data, logs, busy, notice, onDismissNotice, onRefresh, onRunJob, onCancel, onDelete, onClear, onLoadLog, onRunSaved, onDeleteSaved, onRestoreBuiltin, notify }) {
+    function MainPage({ t, lang, data, logs, busy, notice, onDismissNotice, onRefresh, onRunJob, onCancel, onDelete, onClear, onLoadLog, onRunSaved, onDeleteSaved, notify }) {
       const [settings, setSettings] = useState(false)
       const jobs = data?.jobs || []
-      const tasks = (data?.tasks || []).filter((task) => !task.builtin)
-      const removedBuiltin = (data?.builtins?.removed || []).includes('restart-dsh')
+      const tasks = data?.tasks || []
       const running = jobs.filter((job) => job.status === 'running').length
-      const [restartPlan, setRestartPlan] = useState(null)
-
-      useEffect(() => {
-        let alive = true
-        request('/api/outlive/preview', { method: 'POST', body: { kind: 'restart' } })
-          .then((result) => {
-            if (alive) setRestartPlan(result)
-          })
-          .catch(() => {})
-        return () => {
-          alive = false
-        }
-      }, [])
-
       return h(
         'div',
         { className: 'outlive-page' },
@@ -1440,37 +1320,6 @@ window.__ModuleLoader__.load({
           h(
             'aside',
             { className: 'outlive-side' },
-            h(
-              'section',
-              { className: 'outlive-card' },
-              h(
-                'div',
-                { className: 'outlive-card-head' },
-                h('h2', { className: 'outlive-card-title' }, t('compose.restart.title')),
-                h('span', { className: 'outlive-badge accent' }, t('tasks.builtin')),
-              ),
-              h('p', { className: 'outlive-card-note' }, t('compose.restart.body')),
-              restartPlan
-                ? h(
-                    'div',
-                    { className: 'outlive-plan', style: { marginTop: 10 } },
-                    h('div', { className: 'outlive-plan-line' }, h('b', null, t('compose.restart.plan')), h('span', null, restartPlan.mode === 'unit' ? t('compose.restart.unitMode', { unit: restartPlan.unit }) : t('compose.restart.processMode'))),
-                    restartPlan.ports?.length ? h('div', { className: 'outlive-plan-line' }, h('b', null, ''), h('span', { className: 'outlive-hint' }, t('compose.restart.ports', { ports: restartPlan.ports.join(', ') }))) : null,
-                  )
-                : null,
-              removedBuiltin
-                ? h(
-                    'div',
-                    { className: 'outlive-actions', style: { marginTop: 12 } },
-                    h('span', { className: 'outlive-hint' }, t('tasks.removed')),
-                    h('button', { type: 'button', className: 'outlive-btn', onClick: onRestoreBuiltin }, t('tasks.restore')),
-                  )
-                : h(
-                    'div',
-                    { className: 'outlive-actions', style: { marginTop: 12 } },
-                    h('button', { type: 'button', className: 'outlive-btn primary', disabled: busy, onClick: () => onRunJob({ kind: 'restart' }) }, h(Icon, { name: 'refresh', size: 13 }), t('tasks.run')),
-                  ),
-            ),
             h(
               'section',
               { className: 'outlive-card' },
@@ -1691,19 +1540,6 @@ window.__ModuleLoader__.load({
           }
         }
 
-        const restoreBuiltin = async () => {
-          setBusy(true)
-          try {
-            await request('/api/outlive/tasks/restore', { method: 'POST', body: { key: 'restart-dsh' } })
-            notify(translate('notice.restored'), 'ok')
-            await load()
-          } catch (error) {
-            notify(errorMessage(translate, error), 'error')
-          } finally {
-            setBusy(false)
-          }
-        }
-
         if (!snapshot?.data) {
           return h(
             'div',
@@ -1739,7 +1575,6 @@ window.__ModuleLoader__.load({
             onLoadLog: loadLog,
             onRunSaved: runSaved,
             onDeleteSaved: deleteSaved,
-            onRestoreBuiltin: restoreBuiltin,
             notify,
         })
       }
@@ -1774,25 +1609,24 @@ window.__ModuleLoader__.load({
           trigger: '/',
           name: 'outlive',
           order: 30,
-          candidates(_session, query) {
-            const term = String(query || '').trim().toLowerCase()
-            const fixed = [{ id: 'outlive:agent', name: 'outlive', description: t('trigger.agent.desc'), role: 'agent' }]
+          candidates(_session, req) {
+            const term = String(req?.query || '').trim().toLowerCase()
+            const fixed = [{ name: 'outlive', label: 'outlive', description: t('trigger.agent.desc'), value: 'outlive:agent' }]
             const saved = (state?.data?.tasks || [])
-              .filter((task) => !task.builtin)
               .map((task) => ({
-                id: `outlive:${task.id}`,
-                name: `outlive · ${task.label || task.id}`,
+                name: `outlive:${task.id}`,
+                label: task.label || `outlive · ${task.id}`,
                 description: [task.kind, task.agent].filter(Boolean).join(' · '),
-                task,
+                value: `outlive:${task.id}`,
               }))
             return [...fixed, ...saved].filter((entry) => !term || `${entry.name} ${entry.description}`.toLowerCase().includes(term))
           },
-          onPick(entry) {
-            if (entry.task) {
-              const draft = entry.task.kind === 'command' ? t('trigger.draft.command') : t('trigger.draft')
-              return `${draft}\n\n${entry.task.kind === 'command' ? entry.task.command : entry.task.task}`
-            }
-            return `${t('trigger.draft')}\n\n`
+          onPick(pick) {
+            const value = String(pick?.candidate?.value || '')
+            const task = (state?.data?.tasks || []).find((entry) => `outlive:${entry.id}` === value)
+            if (task && task.kind === 'command') return { text: `${t('trigger.draft.command')}\n\n${task.command}` }
+            if (task) return { text: `${t('trigger.draft')}\n\n${task.task}` }
+            return { text: `${t('trigger.draft')}\n\n` }
           },
         }
         const existing = ctx.get?.('inputTriggers')

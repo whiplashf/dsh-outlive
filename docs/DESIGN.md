@@ -1,6 +1,8 @@
 # Outlive — design
 
-Outlive lets a DSH session hand work to a transient systemd unit that lives outside the dsh process tree. A dsh restart loses the poll loop, not the work. The plugin also ships one operational task people actually need: **Restart DSH Web**.
+> Status: paused (2026-11-20). This document describes the design as built, not a roadmap. The open question is whether a plugin that only adds "run work outside the host process tree" earns its place next to the harness's own background jobs.
+
+Outlive lets a DSH session hand work to a transient systemd unit that lives outside the dsh process tree. A dsh restart loses the poll loop, not the work — which also means the job that restarts dsh is one of the jobs this plugin is for.
 
 ## Goals
 
@@ -8,7 +10,6 @@ Outlive lets a DSH session hand work to a transient systemd unit that lives outs
 - Detect coding-agent CLIs on `PATH`; let the user add any other executable through a file browser, not a text path field.
 - Keep the panel readable on a large screen: one centered column, no controls pinned to the viewport edge.
 - Explain every failure in the panel, with the command that will run available before dispatch.
-- Restart dsh correctly whether or not it is supervised by systemd.
 
 ## Non-goals
 
@@ -28,7 +29,6 @@ client.js (browser)                 index.js (host)
                               lib/store.js      ledger on disk
                               lib/agents.js     detection + command building
                               lib/dispatch.js   systemd-run, cancel, reconcile
-                              lib/restart.js    restart plan + script
                               lib/fsbrowse.js   host filesystem listing
                               lib/notify.js     result messages
 ```
@@ -41,17 +41,16 @@ The host never runs work itself. It writes `command.sh` and `run.sh` under the s
 $OUTLIVE_HOME | ${XDG_STATE_HOME:-~/.local/state}/outlive/
   jobs/<12-hex>/
     job.json      ledger record
-    command.sh    the command, or the generated restart script
+    command.sh    the command
     run.sh        launcher: redirects output, records the exit marker
     task.txt      agent input (agent jobs only)
-    start.sh      relaunch script (process-mode restart only, mode 0600)
     out.log       combined stdout/stderr
     exit          "<code> <epoch-ms>" written by run.sh
-  tasks.json      saved tasks + removed built-ins
+  tasks.json      saved tasks
   agents.json     custom agents
 ```
 
-`job.json` fields: `id`, `kind` (`agent` | `command` | `restart`), `label`, `agent`, `command`, `cwd`, `unit`, `dir`, `logPath`, `status` (`running` | `completed` | `failed` | `cancelled`), `exitCode`, `startedAt`, `finishedAt`, `runtimeMaxSec`, `sessionId`, `lang`, `notify`, `error`, `killed`, `taskId`, `builtin`, `plan`.
+`job.json` fields: `id`, `kind` (`agent` | `command`), `label`, `agent`, `command`, `cwd`, `unit`, `dir`, `logPath`, `status` (`running` | `completed` | `failed` | `cancelled`), `exitCode`, `startedAt`, `finishedAt`, `runtimeMaxSec`, `sessionId`, `lang`, `notify`, `error`, `killed`, `taskId`.
 
 ### HTTP API
 
@@ -67,12 +66,11 @@ The routes live on DSH's authenticated `/api` Fetch channel, so the host's brows
 | `/api/outlive/agents` | GET | Detection; `refresh=1` bypasses the 30 s cache. |
 | `/api/outlive/agents` | POST | Add or replace a custom agent (absolute executable + template). |
 | `/api/outlive/agents/delete` | POST | Remove a custom agent. |
-| `/api/outlive/preview` | POST | The exact command an agent, command, or restart job will run. |
+| `/api/outlive/preview` | POST | The exact command an agent or command job will run. |
 | `/api/outlive/tasks` | GET/POST | List or save a task. |
-| `/api/outlive/tasks/delete` | POST | Delete a task (including the built-in one). |
-| `/api/outlive/tasks/restore` | POST | Restore the built-in `restart-dsh` task. |
+| `/api/outlive/tasks/delete` | POST | Delete a saved task. |
 | `/api/outlive/fs` | GET | Directory listing for the file and directory pickers. |
-| `/api/outlive/run` | POST | Dispatch an agent, command, or restart job. |
+| `/api/outlive/run` | POST | Dispatch an agent or command job. |
 
 Errors are `{ "error": "agentNeedsArgs", "detail": "gemini" }`. The panel maps known codes to localized copy; unknown codes fall back to `detail`.
 
@@ -84,17 +82,11 @@ Custom agents are stored in `agents.json`. A custom agent with the same name as 
 
 `{file}` expands to `"$(cat '<task-file>')"`; `{title}` expands to the shell-quoted label. The command is built once, on the host, so the preview and the executed script cannot diverge.
 
-### Restart plan
+### Restarting dsh
 
-The built-in task asks the host for a plan at dispatch time:
+Restarting the host is not a feature of this plugin: it is an ordinary command job, and the detached unit is what makes it safe. `outlive_run command="systemctl --user restart dsh-web"` writes a script that calls systemd, so systemd owns the relaunch and one instance comes back. There is no kill-then-relaunch path in this codebase, and therefore no way for a failed relaunch to leave the host dead with the job still holding the only record of what was tried.
 
-1. Read `/proc/<pid>/cgroup` and take the last unit-shaped component.
-2. If `systemctl --user show <unit>` reports `MainPID == <pid>`, `Transient=no`, `LoadState=loaded`, and a `FragmentPath`, the plan is **unit mode**: `systemctl --user restart <unit>`.
-3. Otherwise the plan is **process mode**: capture argv, cwd, and environment from `/proc/<pid>`, SIGTERM the process, wait up to 20 s, SIGKILL if needed, then start the same argv in a fresh transient unit (`outlive-dsh-<job>`), redirecting its output to `dsh.log`.
-
-Why both: with `Restart=on-failure` systemd treats a signal-terminated main process as a failure and starts it again. A pure kill-and-relaunch therefore races systemd and can leave two instances competing for the port. Unit mode hands the restart to systemd; process mode is only used when no persistent unit owns the process.
-
-Health check: the host records the process's listening TCP ports before the restart (from `ss -Hltnp`, or `--port` in argv when `ss` is unavailable). The restart script polls those ports, or the unit's `ActiveState`, and exits non-zero if they do not come back. The new process's output goes to `dsh.log`; the relaunch script contains the inherited environment and is mode 0600.
+Users who want a restart that waits for idle agents and wakes the asking session should install a dedicated restart plugin.
 
 ### Notifications
 
@@ -110,8 +102,8 @@ After a job settles, the ledger is pruned to the newest 200 jobs. Only settled j
 - The unit exits without an `exit` marker (timeout, `systemctl stop`, crash) → the poll loop asks `systemctl show` for `ActiveState`/`ExecMainStatus` and marks the job failed instead of leaving it `running` forever.
 - A bad `cwd` → the launcher writes exit 1 with a message before running the command.
 - A missing agent binary after dispatch → the command fails with exit 127 in the log; the job is `failed`.
-- A restart whose ports never return → the restart job exits 1 and says which check failed.
+- A command job that restarts dsh → the job is a plain command job: its own log ends with the new process starting, and the panel reconnects by itself.
 
 ## Testing
 
-`node --test` covers the pure modules: state resolution and retention, task identity and built-in restore, agent detection and command building, listening-port parsing and restart-plan selection, restart script generation, directory listing, and route handlers mounted on a fake web server with an injected dispatcher. Systemd itself is not exercised by the test suite; a manual smoke test is documented in the README.
+`node --test` covers the pure modules: state resolution and retention, task identity and legacy-task migration, agent detection and command building, directory listing, and route handlers mounted on a fake web server with an injected dispatcher. Systemd itself is not exercised by the test suite; a manual smoke test is documented in the README.

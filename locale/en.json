@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Outlive",
-    "description": "Run coding agents, shell commands, or a DSH restart outside the session in transient systemd units; results come back to the session.",
-    "detail": "Background work started inside the harness dies with the dsh process. Outlive writes a script, hands it to a transient systemd unit in a different cgroup, and then only reads the log and exit marker. Restarting dsh loses the poll loop, not the work.\n\nSix tools: outlive_run for one shell command, outlive_agent for a whole task on a coding agent, outlive_agents for agent detection and configuration, outlive_status and outlive_list for the ledger, outlive_cancel to stop a job. The side panel lists running jobs, their logs, saved tasks, and a built-in Restart DSH Web task. On Linux this task restarts the systemd unit that owns dsh when there is one, and otherwise terminates and relaunches the process with the same argv, working directory, and environment."
+    "description": "Run coding agents and shell commands outside the session in transient systemd units; results come back to the session.",
+    "detail": "Background work started inside the harness dies with the dsh process. Outlive writes a script, hands it to a transient systemd unit in a different cgroup, and then only reads the log and exit marker. Restarting dsh loses the poll loop, not the work — which is why a restart makes a good Outlive job.\n\nSix tools: outlive_run for one shell command, outlive_agent for a whole task on a coding agent, outlive_agents for agent detection and configuration, outlive_status and outlive_list for the ledger, outlive_cancel to stop a job. The side panel lists running jobs with their logs and the saved tasks. There is no restart button: restarting dsh is `outlive_run command=\"systemctl --user restart dsh-web\"`, and because the job runs outside the process it restarts, that command survives the restart it triggers."
   }
 }

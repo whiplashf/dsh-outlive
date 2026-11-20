@@ -97,16 +97,6 @@ const STATE = {
   },
   jobs: [
     {
-      id: '0123456789ab',
-      kind: 'restart',
-      label: 'Restart DSH Web',
-      status: 'completed',
-      startedAt: Date.now() - 600000,
-      finishedAt: Date.now() - 540000,
-      exitCode: 0,
-      agent: null,
-    },
-    {
       id: 'ba9876543210',
       kind: 'agent',
       label: 'Refactor the runner',
@@ -117,10 +107,8 @@ const STATE = {
     },
   ],
   tasks: [
-    { id: 'builtin-restart-dsh', kind: 'restart', label: 'Restart DSH Web', builtin: true, command: 'restart-dsh' },
     { id: '111122223333', kind: 'command', label: 'Rebuild the site', command: 'npm run build', cwd: '/tmp/site' },
   ],
-  builtins: { available: ['restart-dsh'], removed: [] },
 }
 
 function createFetch(calls) {
@@ -131,7 +119,7 @@ function createFetch(calls) {
       : url.startsWith('/api/outlive/log')
         ? { log: 'line one\nline two' }
         : url.startsWith('/api/outlive/preview')
-          ? { command: 'systemctl --user restart dsh-web.service', mode: 'unit', unit: 'dsh-web.service', ports: [13080], host: '127.0.0.1' }
+          ? { command: 'npm run build', agent: 'opencode' }
           : url.startsWith('/api/outlive/fs')
             ? { path: '/usr/local/bin', entries: [{ name: 'opencode', path: '/usr/local/bin/opencode', dir: false, executable: true }], places: [{ label: 'Home', path: '/home/dev' }] }
             : {}
@@ -278,11 +266,9 @@ test('client bundle registers the panel, the sidebar entry and the trigger sourc
 
     const flat = out.text.join('\n')
     assert.match(flat, /Outlive/)
-    assert.match(flat, /Restart DSH Web/)
     assert.match(flat, /Refactor the runner/)
     assert.match(flat, /Rebuild the site/)
     assert.match(flat, /1 running/)
-    assert.match(flat, /Unit mode/, 'the restart card shows the detected plan')
     assert.match(flat, /Gemini CLI/, 'the agents card lists detected agents')
     assert.match(flat, /Needs arguments|需补参数/, 'an agent without arguments is flagged')
     const leaked = out.text.filter((text) => KEY_LIKE.test(text) && !/^(https?|usr|home|tmp|api)/.test(text))

@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Outlive",
-    "description": "把编码 Agent、Shell 命令或 DSH 重启放到会话之外的瞬态 systemd unit 中执行，完成后把结果送回会话。",
-    "detail": "在 harness 内部启动的后台任务会随 dsh 进程一起结束。Outlive 只写一个脚本、交给另一个 cgroup 里的瞬态 systemd unit，之后只读日志和退出标记。重启 dsh 丢掉的只是轮询循环，任务本身仍在运行。\n\n六个工具：outlive_run 执行一条 Shell 命令，outlive_agent 把整件任务交给编码 Agent，outlive_agents 查看和配置 Agent，outlive_status 与 outlive_list 查看记录，outlive_cancel 中止任务。侧栏面板列出运行中的任务、日志、常用任务，以及内置的「重启 DSH Web」任务。在 Linux 上，这个任务会优先重启托管 dsh 的 systemd unit；没有持久 unit 时，则按原 argv、工作目录和环境变量终止并重新拉起进程。"
+    "description": "把编码 Agent 与 Shell 命令放到会话之外的瞬态 systemd unit 中执行，完成后把结果送回会话。",
+    "detail": "在 harness 内部启动的后台任务会随 dsh 进程一起结束。Outlive 只写一个脚本、交给另一个 cgroup 里的瞬态 systemd unit，之后只读日志和退出标记。重启 dsh 丢掉的只是轮询循环，任务本身仍在运行——所以重启正是 Outlive 适合做的事。\n\n六个工具：outlive_run 执行一条 Shell 命令，outlive_agent 把整件任务交给编码 Agent，outlive_agents 查看和配置 Agent，outlive_status 与 outlive_list 查看记录，outlive_cancel 中止任务。侧栏面板列出运行中的任务及其日志，以及常用任务。没有重启按钮：重启 dsh 就是 `outlive_run command=\"systemctl --user restart dsh-web\"`；任务跑在它要重启的进程之外，因此它触发的那次重启不会把它自己杀掉。"
   }
 }

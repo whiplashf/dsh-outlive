@@ -1,8 +1,8 @@
 # Outlive
 
-Run coding agents and shell commands **outside** the DSH session, in a transient systemd unit that survives a closed tab, a stopped session, and a restarted `dsh` process. Results come back into the conversation when the job finishes.
+> **Status: on hold (2026-11-20).** The code works, but what the plugin is *for* is still unresolved. Detached jobs came out of "let an agent hand work to something that outlives the session", and after building it I could not say why that matters more than the harness's own background jobs. Development is paused until that question has an answer; nothing here is broken, and the removal of the built-in restart task in this release is part of the same reckoning — restarting belongs to plugins that do only that.
 
-It also ships the one operational task most installations need: **Restart DSH Web**, with a restart path that works whether or not systemd supervises `dsh`.
+Run coding agents and shell commands **outside** the DSH session, in a transient systemd unit that survives a closed tab, a stopped session, and a restarted `dsh` process. Results come back into the conversation when the job finishes.
 
 ```
 browser panel ──▶ /api/outlive/* ──▶ systemd-run --user --unit=outlive-<job>
@@ -32,16 +32,15 @@ The package declares `dsh.bundle` and `dsh.client`, so the plugin manager adds i
 
 ## Use it
 
-### Restart DSH Web (the built-in task)
+### Restarting DSH
 
-Open **Outlive** → **Restart DSH Web** → **Run**. The panel shows the plan before you run it:
+Outlive has no restart button, and that is deliberate: restarting a process is an ordinary shell command, and a detached unit is exactly where such a command belongs. Because the job runs outside the `dsh` process tree, the restart it triggers does not kill the job:
 
-- **Unit mode** — the `dsh` process is the main process of a persistent user unit (for example `dsh-web.service`). The job calls `systemctl --user restart <unit>` and lets systemd do the work, so the new process stays supervised.
-- **Process mode** — no persistent unit owns the process. The job reads the current argv, working directory, and environment from `/proc`, sends `SIGTERM`, and relaunches the same command in a new transient unit so the restart survives the process it is replacing.
+```bash
+outlive_run command="systemctl --user restart dsh-web" label="Restart DSH"
+```
 
-Either way the job waits for the port the old process was listening on (`ss -Hltnp`, or `--port` from argv) and reports success only when something answers on it. The panel's own session reconnects by itself; jobs keep running.
-
-The built-in task can be deleted like any other saved task and restored from the same panel — the ledger of past runs stays.
+Save it as a task in the panel to get a one-click button for later. If you want a restart that waits for agents to go idle and then wakes the session that asked for it, install a dedicated restart plugin from the marketplace — those plugins already do it better than a generic runner could.
 
 ### Give an agent a task
 
@@ -133,14 +132,13 @@ $OUTLIVE_HOME
 - The file browser is read-only, absolute paths only, capped at 1000 entries.
 - Job scripts and the task file are `0600`/`0700` under the state directory.
 - An agent job inherits a small allowlist of environment variables (paths, locale, proxy, and common `*_API_KEY` names); nothing else from the host process leaks into the unit.
-- The restart task runs as your user and can only restart a unit you already own.
+- Anything you run as a job runs as your user; a restart job can only touch units you already own.
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
 | `systemd-run is not available on this host` | No systemd user manager in this session. Log in as a normal user session (`loginctl enable-linger` if needed) — Outlive cannot work without it. |
-| Restart job fails with "did not come back" | The process went down but nothing answered on the port within 30 s. Read the job log: it is the new process's own output. |
 | Agent listed as *needs arguments* | That preset has no verified argument template. Add the same binary as a custom agent with an argument template containing `{file}`. |
 | Panel shows no agents | Nothing on `PATH`. Outlive also searches `~/.local/bin`, `~/.opencode/bin`, `~/.bun/bin`, `~/.cargo/bin`, `~/.npm-global/bin`, `~/go/bin`, `/usr/local/bin`, `/usr/local/nodejs/bin`, `/usr/bin`. |
 
@@ -151,7 +149,7 @@ npm test     # node --test, no network, no systemd required
 npm run check
 ```
 
-Layout: `index.js` (host: ledger, routes, tools), `client.js` (browser panel), `lib/store.js` (records), `lib/agents.js` (detection, command building), `lib/dispatch.js` (systemd units), `lib/restart.js` (restart plans), `lib/fsbrowse.js` (file browser), `lib/notify.js` (result messages).
+Layout: `index.js` (host: ledger, routes, tools), `client.js` (browser panel), `lib/store.js` (records), `lib/agents.js` (detection, command building), `lib/dispatch.js` (systemd units), `lib/fsbrowse.js` (file browser), `lib/notify.js` (result messages).
 
 See [docs/DESIGN.md](docs/DESIGN.md), [docs/adr/](docs/adr/), and [GLOSSARY.md](GLOSSARY.md).
 

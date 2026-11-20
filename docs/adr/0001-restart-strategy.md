@@ -1,6 +1,6 @@
 # 0001 — Restart dsh through systemd when a unit owns it, otherwise relaunch the process
 
-- Status: accepted
+- Status: superseded by [0003](0003-remove-restart.md)
 - Date: 2026-11-20
 
 ## Context

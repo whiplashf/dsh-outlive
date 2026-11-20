@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createStore, resolveStateDir, taskKey } from '../lib/store.js'
@@ -79,17 +79,27 @@ test('prune keeps the newest settled jobs and never touches running ones', () =>
   assert.equal(store.readJob(running.id).status, 'running')
 })
 
-test('built-in restart task can be removed and restored', () => {
+test('a task written by the old restart release is dropped on read', () => {
   const store = freshStore()
-  store.ensureBuiltins()
-  assert.ok(store.readTasks().some((task) => task.id === 'builtin-restart-dsh'))
-  const removed = store.deleteTask('builtin-restart-dsh')
-  assert.equal(removed.builtin, 'restart-dsh')
-  assert.ok(!store.readTasks().some((task) => task.id === 'builtin-restart-dsh'))
-  store.ensureBuiltins()
-  assert.ok(!store.readTasks().some((task) => task.id === 'builtin-restart-dsh'), 'removal is sticky')
-  assert.ok(store.restoreBuiltin('restart-dsh').ok)
-  assert.ok(store.readTasks().some((task) => task.id === 'builtin-restart-dsh'))
+  writeFileSync(
+    store.tasksPath,
+    JSON.stringify({
+      version: 1,
+      tasks: [
+        { id: 'builtin-restart-dsh', kind: 'restart', builtin: 'restart-dsh', command: 'restart-dsh' },
+        { id: '111122223333', kind: 'command', command: 'npm run build' },
+      ],
+      removedBuiltins: ['restart-dsh'],
+    }),
+  )
+  const tasks = store.readTasks()
+  assert.deepEqual(tasks.map((task) => task.id), ['111122223333'])
+  assert.equal(store.deleteTask('builtin-restart-dsh').error, 'notFound')
+
+  store.saveTask({ kind: 'command', command: 'npm test' })
+  const raw = JSON.parse(readFileSync(store.tasksPath, 'utf8'))
+  assert.equal(raw.removedBuiltins, undefined, 'the old bookkeeping field is not written back')
+  assert.ok(!raw.tasks.some((task) => task.id === 'builtin-restart-dsh'))
 })
 
 test('saved tasks dedupe by content and keep the newest first', () => {

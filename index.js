@@ -7,7 +7,7 @@
  */
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createStore, resolveStateDir, BUILTIN_TASKS, RETENTION, TASK_ID, JOB_ID } from './lib/store.js'
+import { createStore, resolveStateDir, RETENTION, TASK_ID, JOB_ID } from './lib/store.js'
 import {
   createAgents,
   buildAgentCommand,
@@ -22,7 +22,6 @@ import {
   writeRunScript,
   unitFor,
 } from './lib/dispatch.js'
-import { planRestart, restartPlanText, writeRestartScript, writeEnvironmentFile } from './lib/restart.js'
 import { browse } from './lib/fsbrowse.js'
 import { noticeText, userMessage, pickLang, readTail } from './lib/notify.js'
 
@@ -85,7 +84,6 @@ export function apply(ctx, config = {}) {
   const pollMs = clampInt(config.pollMs, 500, 60000, DEFAULT_POLL)
   const stateDir = resolveStateDir({ configured: config.stateDir })
   const store = createStore({ stateDir })
-  store.ensureBuiltins()
 
   const catalog = createAgents({
     pathEnv: process.env.PATH || '',
@@ -109,13 +107,11 @@ export function apply(ctx, config = {}) {
       status: job.status,
       agent: job.agent || null,
       cwd: job.cwd || null,
-      mode: job.mode || null,
-      restartUnit: job.restartUnit || null,
+      command: job.command || null,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt || null,
       exitCode: Number.isFinite(job.exitCode) ? job.exitCode : null,
       error: job.error || null,
-      builtin: job.builtin || null,
       logPath: job.logPath,
     }
   }
@@ -178,7 +174,7 @@ export function apply(ctx, config = {}) {
     if (job.status !== 'running') return job
     const age = Date.now() - Date.parse(job.startedAt || 0)
     let unit = null
-    if (probe && age > 2500) unit = probeUnit(job.unit)
+    if (probe && age > 2500) unit = probeUnit(job.unit || unitFor(job.id))
     const next = store.settle(job, { unit })
     if (next.status !== 'running' && next.notify?.state === 'pending') deliver(next)
     return next
@@ -213,7 +209,33 @@ export function apply(ctx, config = {}) {
         finishedAt: new Date().toISOString(),
       })
     }
-    return job
+    // The unit name is derived from the id, but losing it from the ledger would
+    // leave cancel and settle unable to address the process later.
+    return store.patchJob(job.id, { unit: unitFor(job.id) })
+  }
+
+  /** Record a job as cancelled once its unit is confirmed stopped. */
+  function cancelJob(job) {
+    const unit = job.unit || unitFor(job.id)
+    const stopped = stopUnit(unit)
+    if (stopped.error) return { error: stopped.error, detail: stopped.detail || null }
+    if (!stopped.ok) {
+      const probe = probeUnit(unit)
+      const alive = probe && ['active', 'activating', 'reloading'].includes(probe.activeState)
+      if (alive) return { error: 'stopFailed', detail: stopped.detail || null }
+      const settled = store.settle(job, { unit: probe })
+      return settled.status === 'running' ? { error: 'stopFailed', detail: stopped.detail || null } : { job: settled }
+    }
+    const notify = job.notify?.state === 'pending' ? job.notify : { state: 'none', attempts: 0 }
+    const next = store.patchJob(job.id, {
+      status: 'cancelled',
+      killed: true,
+      exitCode: 143,
+      finishedAt: new Date().toISOString(),
+      notify: job.sessionId ? { ...notify, state: 'pending' } : notify,
+    })
+    if (next.notify?.state === 'pending') deliver(next)
+    return { job: next }
   }
 
   function startCommandJob({ command, label, cwd, runtimeMaxSec, env, sessionId = null, lang = 'en' }) {
@@ -297,65 +319,6 @@ export function apply(ctx, config = {}) {
     } catch (error) {
       const reason = String(error?.message || error).slice(0, 1000)
       return { job: store.patchJob(job.id, { status: 'failed', error: reason, finishedAt: new Date().toISOString() }), error: reason }
-    }
-  }
-
-  function startRestartJob({ lang = 'en', sessionId = null } = {}) {
-    let plan
-    try {
-      plan = planRestart({ pid: process.pid })
-    } catch (error) {
-      return { error: 'planFailed', detail: String(error?.message || error) }
-    }
-    const job = store.createJob({
-      kind: 'restart',
-      label: null,
-      builtin: 'restart-dsh',
-      command: restartPlanText(plan),
-      cwd: plan.cwd,
-      agent: null,
-      runtimeMaxSec: 300,
-      sessionId,
-      lang: pickLang(lang),
-      mode: plan.mode,
-      restartUnit: plan.mode === 'unit' ? plan.unit : null,
-      plan: {
-        mode: plan.mode,
-        unit: plan.unit,
-        pid: plan.pid,
-        ports: plan.ports,
-        host: plan.host,
-        argv: plan.argv,
-      },
-    })
-    const relaunchUnit = plan.mode === 'unit' ? plan.unit : `outlive-dsh-${job.id}`
-    const envPath = join(job.dir, 'restart.env')
-    try {
-      if (plan.mode === 'process') writeEnvironmentFile(envPath, plan.env)
-      const script = writeRestartScript({
-        dir: job.dir,
-        plan,
-        unit: relaunchUnit,
-        logPath: job.logPath,
-        exitPath: join(job.dir, 'exit'),
-        envPath,
-      })
-      const started = startUnit({
-        unit: unitFor(job.id),
-        description: 'outlive: restart dsh',
-        cwd: plan.cwd,
-        runtimeMaxSec: 300,
-        scriptPath: script,
-        env: {},
-      })
-      if (!started.ok) {
-        const reason = started.error === 'systemdMissing' ? 'systemd-run is not available' : started.detail || started.error
-        return { job: store.patchJob(job.id, { status: 'failed', error: reason, finishedAt: new Date().toISOString() }), error: 'dispatchFailed', detail: reason }
-      }
-      return { job: store.readJob(job.id), plan: { mode: plan.mode, unit: plan.unit, restartUnit: relaunchUnit, pid: plan.pid, ports: plan.ports, host: plan.host } }
-    } catch (error) {
-      const reason = String(error?.message || error).slice(0, 1000)
-      return { job: store.patchJob(job.id, { status: 'failed', error: reason, finishedAt: new Date().toISOString() }), error: 'restartFailed', detail: reason }
     }
   }
 
@@ -529,15 +492,8 @@ export function apply(ctx, config = {}) {
         const job = store.readJob(id)
         if (!job) return text(`No job with id ${id}.`)
         if (job.status !== 'running') return text(`Job ${id} is already ${job.status}.`)
-        stopUnit(job.unit)
-        const next = store.patchJob(id, {
-          status: 'cancelled',
-          killed: true,
-          exitCode: 143,
-          finishedAt: new Date().toISOString(),
-          notify: { ...(job.notify || {}), state: job.sessionId ? 'pending' : 'none' },
-        })
-        if (next.notify?.state === 'pending') deliver(next)
+        const cancelled = cancelJob(job)
+        if (cancelled.error) return text(`Could not stop job ${id}: ${cancelled.detail || cancelled.error}`)
         return text(`Cancelled job ${id}.`)
       },
     },
@@ -610,10 +566,6 @@ export function apply(ctx, config = {}) {
       agents: view,
       jobs: store.listJobs({ limit: 100 }).map(panelJob),
       tasks: taskState.tasks,
-      builtins: {
-        available: BUILTIN_TASKS.map((entry) => ({ key: entry.key, id: entry.id })),
-        removed: taskState.removedBuiltins,
-      },
     }
   }
 
@@ -651,14 +603,12 @@ export function apply(ctx, config = {}) {
     [
       '/api/outlive/run',
       post((body) => {
-        const kind = body.kind === 'command' ? 'command' : body.kind === 'restart' ? 'restart' : 'agent'
+        const kind = body.kind === 'command' ? 'command' : 'agent'
         const lang = pickLang(body.lang)
         const cwd = String(body.cwd || defaultCwd).trim() || defaultCwd
         const runtimeMaxSec = clampInt(body.runtime_max_sec, MIN_RUNTIME, MAX_RUNTIME, DEFAULT_RUNTIME)
         let result
-        if (kind === 'restart') {
-          result = startRestartJob({ lang, sessionId: null })
-        } else if (kind === 'command') {
+        if (kind === 'command') {
           result = startCommandJob({
             command: String(body.command || ''),
             label: body.label,
@@ -680,7 +630,7 @@ export function apply(ctx, config = {}) {
         }
         if (result.error) return { error: result.error, detail: result.detail || null, job: result.job ? panelJob(result.job) : null }
         if (body.taskId && TASK_ID.test(String(body.taskId))) store.bumpTask(String(body.taskId))
-        return { job: panelJob(result.job), plan: result.plan || null }
+        return { job: panelJob(result.job) }
       }),
     ],
     [
@@ -691,16 +641,10 @@ export function apply(ctx, config = {}) {
         const job = store.readJob(id)
         if (!job) throw Object.assign(new Error('job not found'), { status: 404 })
         if (job.status !== 'running') return { ok: false, detail: 'already settled' }
-        stopUnit(job.unit)
-        const next = store.patchJob(id, {
-          status: 'cancelled',
-          killed: true,
-          exitCode: 143,
-          finishedAt: new Date().toISOString(),
-          notify: { state: 'pending', attempts: 0 },
-        })
-        deliver(next)
-        return { job: panelJob(store.readJob(id) || next) }
+        const cancelled = cancelJob(job)
+        if (cancelled.error) throw Object.assign(new Error(cancelled.detail || cancelled.error), { status: 409 })
+        deliver(cancelled.job)
+        return { job: panelJob(store.readJob(id) || cancelled.job) }
       }),
     ],
     [
@@ -767,30 +711,13 @@ export function apply(ctx, config = {}) {
         if (!TASK_ID.test(id)) throw Object.assign(new Error('invalid task id'), { status: 400 })
         const result = store.deleteTask(id)
         if (result.error) throw Object.assign(new Error(result.error), { status: 404 })
-        return { tasks: store.readTasks(), builtin: result.builtin || null }
-      }),
-    ],
-    [
-      '/api/outlive/tasks/restore',
-      post((body) => {
-        const key = String(body.key || '')
-        const result = store.restoreBuiltin(key)
-        if (result.error) throw Object.assign(new Error(result.error), { status: 404 })
         return { tasks: store.readTasks() }
       }),
     ],
     [
       '/api/outlive/preview',
       post((body) => {
-        const kind = body.kind === 'command' ? 'command' : body.kind === 'restart' ? 'restart' : 'agent'
-        if (kind === 'restart') {
-          try {
-            const plan = planRestart({ pid: process.pid })
-            return { command: restartPlanText(plan), mode: plan.mode, unit: plan.unit, ports: plan.ports, host: plan.host }
-          } catch (error) {
-            throw Object.assign(new Error(String(error?.message || error)), { status: 500 })
-          }
-        }
+        const kind = body.kind === 'command' ? 'command' : 'agent'
         if (kind === 'command') return { command: String(body.command || '') }
         const resolved = catalog.resolve(body.agent || body.engine || 'auto')
         if (!resolved.agent) throw Object.assign(new Error(agentErrorText(resolved.error, resolved)), { status: 400 })

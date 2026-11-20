@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as plugin from '../index.js'
@@ -84,7 +84,35 @@ test('plugin exports the expected name and tools', async () => {
     assert.equal(state.body.stateDir, api.stateDir)
     assert.equal(state.body.version, '1.0.0')
     assert.ok(state.body.agents.list.length >= 3)
-    assert.ok(state.body.tasks.some((task) => task.id === 'builtin-restart-dsh'))
+    assert.deepEqual(state.body.tasks, [], 'a fresh state dir has no saved tasks')
+  } finally {
+    api.stop()
+  }
+})
+
+test('the panel payload keeps the command of a job', async () => {
+  const api = fixture()
+  try {
+    const dir = join(api.stateDir, 'jobs', 'aaaaaaaabbbb')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'job.json'),
+      JSON.stringify({
+        id: 'aaaaaaaabbbb',
+        kind: 'command',
+        status: 'completed',
+        label: 'restart',
+        command: 'systemctl --user restart dsh-web.service',
+        startedAt: new Date().toISOString(),
+        exitCode: 0,
+      }),
+    )
+    const state = await invoke(api.routes, '/api/outlive/state')
+    assert.equal(state.status, 200)
+    const job = state.body.jobs.find((entry) => entry.id === 'aaaaaaaabbbb')
+    assert.ok(job, 'the seeded job is listed')
+    assert.equal(job.command, 'systemctl --user restart dsh-web.service')
+    assert.equal(job.kind, 'command')
   } finally {
     api.stop()
   }
@@ -114,7 +142,7 @@ test('file browser rejects relative paths through the API', async () => {
   }
 })
 
-test('saved tasks round-trip and the built-in can be removed and restored', async () => {
+test('saved tasks round-trip and can be deleted', async () => {
   const api = fixture()
   try {
     const saved = await invoke(api.routes, '/api/outlive/tasks', {
@@ -128,22 +156,12 @@ test('saved tasks round-trip and the built-in can be removed and restored', asyn
     const removed = await invoke(api.routes, '/api/outlive/tasks/delete', {
       method: 'POST',
       headers: post(),
-      body: { id: 'builtin-restart-dsh' },
+      body: { id: saved.body.task.id },
     })
     assert.equal(removed.status, 200)
     const afterRemove = await invoke(api.routes, '/api/outlive/state')
-    assert.deepEqual(afterRemove.body.builtins.removed, ['restart-dsh'])
-
-    const restored = await invoke(api.routes, '/api/outlive/tasks/restore', {
-      method: 'POST',
-      headers: post(),
-      body: { key: 'restart-dsh' },
-    })
-    assert.equal(restored.status, 200)
-    const afterRestore = await invoke(api.routes, '/api/outlive/state')
-    assert.deepEqual(afterRestore.body.builtins.removed, [])
-    assert.ok(afterRestore.body.tasks.some((task) => task.id === 'builtin-restart-dsh'))
-    assert.ok(afterRestore.body.tasks.some((task) => task.label === 'Review'))
+    assert.ok(!afterRemove.body.tasks.some((task) => task.label === 'Review'))
+    assert.equal(afterRemove.body.builtins, undefined)
   } finally {
     api.stop()
   }

@@ -1,8 +1,8 @@
 # Outlive
 
-把编码 Agent 和 shell 命令交给 **会话之外** 的瞬态 systemd unit 执行。关掉浏览器标签、结束会话、重启 `dsh` 进程都不影响它跑完；结束后结果回到对话里。
+> **状态：暂停（2026-11-20）。** 代码是能跑的，但这插件到底为什么存在，我还没想清楚。它的起点是「让 Agent 把活交给一个不会被会话拖死的东西」，做完之后我没能说清它比 harness 自带的后台任务强在哪。在想清楚之前暂停开发；现有功能没有坏，本次删掉内置重启任务也是同一次反省的结果——重启这种事该交给只做重启的插件。
 
-同时内置了大多数安装真正需要的那件运维任务：**重启 DSH Web**。无论 `dsh` 是否被 systemd 托管，重启都能正确完成。
+把编码 Agent 和 shell 命令交给 **会话之外** 的瞬态 systemd unit 执行。关掉浏览器标签、结束会话、重启 `dsh` 进程都不影响它跑完；结束后结果回到对话里。
 
 ```
 浏览器面板 ──▶ /api/outlive/* ──▶ systemd-run --user --unit=outlive-<job>
@@ -32,16 +32,15 @@ dsh plugin --profile web add @whiplashf/dsh-outlive
 
 ## 使用
 
-### 重启 DSH Web（内置任务）
+### 重启 DSH
 
-打开 **Outlive** → **重启 DSH Web** → **运行**。运行前面板会显示本次计划：
+Outlive 没有重启按钮，这是有意的：重启进程就是一条普通 shell 命令，而瞬态 unit 正是跑这类命令的地方。任务跑在 `dsh` 进程树之外，所以它触发的重启不会把自己一起杀掉：
 
-- **unit 模式** —— `dsh` 进程是某个持久用户 unit 的主进程（例如 `dsh-web.service`）。任务执行 `systemctl --user restart <unit>`，交给 systemd 完成重启，新进程仍在监管之下。
-- **process 模式** —— 没有持久 unit 拥有这个进程。任务从 `/proc` 读取当前 argv、工作目录与环境变量，发送 `SIGTERM`，再在**新的瞬态 unit** 中用同样的命令拉起，因此重启动作不会被它要重启的进程一起带走。
+```bash
+outlive_run command="systemctl --user restart dsh-web" label="重启 DSH"
+```
 
-两种模式都会等待旧进程监听过的端口（通过 `ss -Hltnp`，或 argv 里的 `--port`）恢复响应，只有端口真的通了才算成功。面板所在页面会自行重连，任务继续跑。
-
-内置任务可以像普通常用任务一样删除，也能在同一面板一键恢复；历史运行记录保留。
+把它存成面板里的常用任务，以后就是一键按钮。如果你想要「等 Agent 都空闲再重启、并把发起会话唤醒」的体验，去插件市场装专门的重启插件——这类插件在这件事上做得比通用执行器更好。
 
 ### 把任务交给 Agent
 
@@ -133,14 +132,13 @@ $OUTLIVE_HOME
 - 文件浏览是只读的，只接受绝对路径，单次最多 1000 条。
 - 任务脚本与任务文件位于状态目录内，权限 `0600`/`0700`。
 - Agent 任务只继承一份很窄的环境变量白名单（路径、locale、代理、常见 `*_API_KEY`），宿主进程的其他变量不会泄进 unit。
-- 重启任务以当前用户身份运行，只能重启你本来就拥有的 unit。
+- 任何任务都以当前用户身份运行；重启类任务只能操作你本来就拥有的 unit。
 
 ## 排查
 
 | 现象 | 原因与处理 |
 |---|---|
 | `systemd-run is not available on this host` | 当前会话里没有 systemd 用户实例。以普通用户会话登录（必要时 `loginctl enable-linger`）——没有它 Outlive 无法工作。 |
-| 重启任务报「did not come back」 | 进程停了，但端口在 30 秒内没有恢复响应。看任务日志：那是新进程自己的输出。 |
 | Agent 显示「需补参数」 | 该预设没有核实过的参数模板。把同一个可执行文件添加为自定义 Agent，写一个含 `{file}` 的参数模板即可。 |
 | 面板里一个 Agent 都没有 | `PATH` 上没有装。Outlive 还会搜索 `~/.local/bin`、`~/.opencode/bin`、`~/.bun/bin`、`~/.cargo/bin`、`~/.npm-global/bin`、`~/go/bin`、`/usr/local/bin`、`/usr/local/nodejs/bin`、`/usr/bin`。 |
 
@@ -151,7 +149,7 @@ npm test     # node --test，不联网，不需要 systemd
 npm run check
 ```
 
-目录：`index.js`（宿主：记录、路由、工具）、`client.js`（浏览器面板）、`lib/store.js`（记录读写）、`lib/agents.js`（探测与命令构建）、`lib/dispatch.js`（systemd unit）、`lib/restart.js`（重启计划）、`lib/fsbrowse.js`（文件浏览）、`lib/notify.js`（结果消息）。
+目录：`index.js`（宿主：记录、路由、工具）、`client.js`（浏览器面板）、`lib/store.js`（记录读写）、`lib/agents.js`（探测与命令构建）、`lib/dispatch.js`（systemd unit）、`lib/fsbrowse.js`（文件浏览）、`lib/notify.js`（结果消息）。
 
 设计文档：[docs/DESIGN.md](docs/DESIGN.md)、[docs/adr/](docs/adr/)、[GLOSSARY.md](GLOSSARY.md)。
 

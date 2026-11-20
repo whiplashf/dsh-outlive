@@ -40,8 +40,8 @@ test('noticeText reports status, exit, duration and a log tail in English', () =
 })
 
 test('noticeText switches to Chinese for a zh job', () => {
-  const text = noticeText(job({ kind: 'restart', agent: null, label: null, status: 'cancelled', exitCode: 143 }), { lang: 'zh' })
-  assert.match(text, /^\[Outlive\] 任务 0123456789ab（重启 DSH Web）已中止/)
+  const text = noticeText(job({ kind: 'command', agent: null, label: null, status: 'cancelled', exitCode: 143 }), { lang: 'zh' })
+  assert.match(text, /^\[Outlive\] 任务 0123456789ab（命令）已中止/)
   assert.match(text, /exit 143/)
   assert.match(text, /日志/)
 })
