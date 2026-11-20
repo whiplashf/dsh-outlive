@@ -1,0 +1,25 @@
+{
+  "name": "@local/dsh-outlive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hand work to a systemd unit outside the harness process: detached commands and detached coding agents that survive a restart",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale",
+    "docs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

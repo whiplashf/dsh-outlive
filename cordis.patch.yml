@@ -1,0 +1,5 @@
+- insert:
+    - id: tool-outlive
+      name: '@local/dsh-outlive'
+      config:
+        pollMs: 3000

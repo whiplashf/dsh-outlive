@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Outlive",
+    "description": "Hand a command or a whole task to a systemd unit outside the harness: it survives a restart and reports back into the session.",
+    "detail": "Built-in background jobs (including bash run_in_background) are children of the dsh web process, so restarting that process kills them. This plugin runs nothing itself: it writes a script, hands it to a transient systemd unit in another cgroup, and afterwards only reads the log and exit marker on disk. Restarting the harness loses one polling loop; the work keeps running and the record keeps its books."
+  }
+}

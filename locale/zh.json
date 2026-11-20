@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "离场执行",
+    "description": "把命令或整件任务交给 harness 之外的 systemd unit 去跑，重启不中断，结束时把结果送回会话。",
+    "detail": "内置的后台任务（包括 bash 的 run_in_background）都是 dsh web 的子进程，进程一重启就一起没了。这个插件自己不执行任何东西：它写一个脚本、交给独立的 systemd 瞬态 unit，然后只读磁盘上的日志和退出码。于是重启 dsh 只丢一个轮询循环，活还在跑，账还在记。"
+  }
+}
