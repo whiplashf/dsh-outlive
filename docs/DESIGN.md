@@ -20,7 +20,7 @@ Outlive lets a DSH session hand work to a transient systemd unit that lives outs
 
 ```
 client.js (browser)                 index.js (host)
-  page + drawer + file picker  ──▶   /__outlive/* routes
+  page + drawer + file picker  ──▶   /api/outlive/* routes
   locale dictionaries                 tools (outlive_*)
         │                                  │
         └──────────── HTTP ────────────────┤
@@ -55,26 +55,26 @@ $OUTLIVE_HOME | ${XDG_STATE_HOME:-~/.local/state}/outlive/
 
 ### HTTP API
 
-All routes require the `x-outlive: 1` header; this turns cross-origin requests into a CORS preflight the server never answers, and is checked on GET as well as POST.
+The routes live on DSH's authenticated `/api` Fetch channel, so the host's browser-session gate runs first: no session is `401`, a non-owner peer is `403`. Outlive adds its own fence on top — every mutating call must carry `x-outlive: 1` and a JSON content type, which turns a cross-origin request into a CORS preflight the server never answers. Each route is registered as one exact `path` with a single `method`; the carrier only hands the handler a body-less `Request` when the route declares `requestBody: 'buffered'`, so GET routes declare it too.
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/__outlive/state` | GET | One snapshot: jobs, agents, tasks, defaults, version, platform support. |
-| `/__outlive/job/log` | GET | Log tail (`id`, `tail`). Plain text. |
-| `/__outlive/job/cancel` | POST | Stop a running job's unit. |
-| `/__outlive/job/delete` | POST | Remove a settled job directory. |
-| `/__outlive/jobs/clear` | POST | Remove every settled job directory. |
-| `/__outlive/agents` | GET | Detection; `refresh=1` bypasses the 30 s cache. |
-| `/__outlive/agents` | POST | Add or replace a custom agent (absolute executable + template). |
-| `/__outlive/agents/delete` | POST | Remove a custom agent. |
-| `/__outlive/preview` | POST | The exact command an agent, command, or restart job will run. |
-| `/__outlive/tasks` | GET/POST | List or save a task. |
-| `/__outlive/tasks/delete` | POST | Delete a task (including the built-in one). |
-| `/__outlive/tasks/restore` | POST | Restore the built-in `restart-dsh` task. |
-| `/__outlive/fs` | GET | Directory listing for the file and directory pickers. |
-| `/__outlive/run` | POST | Dispatch an agent, command, or restart job. |
+| `/api/outlive/state` | GET | One snapshot: jobs, agents, tasks, defaults, version, platform support. |
+| `/api/outlive/log` | GET | Log tail (`id`, `tail`). |
+| `/api/outlive/cancel` | POST | Stop a running job's unit. |
+| `/api/outlive/delete` | POST | Remove a settled job directory. |
+| `/api/outlive/jobs/clear` | POST | Remove every settled job directory. |
+| `/api/outlive/agents` | GET | Detection; `refresh=1` bypasses the 30 s cache. |
+| `/api/outlive/agents` | POST | Add or replace a custom agent (absolute executable + template). |
+| `/api/outlive/agents/delete` | POST | Remove a custom agent. |
+| `/api/outlive/preview` | POST | The exact command an agent, command, or restart job will run. |
+| `/api/outlive/tasks` | GET/POST | List or save a task. |
+| `/api/outlive/tasks/delete` | POST | Delete a task (including the built-in one). |
+| `/api/outlive/tasks/restore` | POST | Restore the built-in `restart-dsh` task. |
+| `/api/outlive/fs` | GET | Directory listing for the file and directory pickers. |
+| `/api/outlive/run` | POST | Dispatch an agent, command, or restart job. |
 
-Errors are `{ "code": "agentNeedsArgs", "detail": "gemini" }`. The panel maps known codes to localized copy; unknown codes fall back to `detail`.
+Errors are `{ "error": "agentNeedsArgs", "detail": "gemini" }`. The panel maps known codes to localized copy; unknown codes fall back to `detail`.
 
 ### Agent detection
 

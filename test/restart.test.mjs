@@ -75,7 +75,7 @@ test('restartPlanText describes both plans', () => {
   assert.equal(restartPlanText({ mode: 'unit', unit: 'dsh-web.service' }), 'systemctl --user restart dsh-web.service')
   const text = restartPlanText({ mode: 'process', pid: 42, argv: ['/bin/dsh', 'web', '--port', '1'] })
   assert.match(text, /kill -TERM 42/)
-  assert.match(text, /start \/bin\/dsh web --port 1/)
+  assert.match(text, /kill -TERM 42\n'\/bin\/dsh' 'web' '--port' '1'/)
 })
 
 test('writeEnvironmentFile keeps only valid keys and is 0600', () => {

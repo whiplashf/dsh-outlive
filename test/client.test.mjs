@@ -126,13 +126,13 @@ const STATE = {
 function createFetch(calls) {
   return async (url, options = {}) => {
     calls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : undefined })
-    const body = url.startsWith('/__outlive/state')
+    const body = url.startsWith('/api/outlive/state')
       ? STATE
-      : url.startsWith('/__outlive/log')
+      : url.startsWith('/api/outlive/log')
         ? { log: 'line one\nline two' }
-        : url.startsWith('/__outlive/preview')
+        : url.startsWith('/api/outlive/preview')
           ? { command: 'systemctl --user restart dsh-web.service', mode: 'unit', unit: 'dsh-web.service', ports: [13080], host: '127.0.0.1' }
-          : url.startsWith('/__outlive/fs')
+          : url.startsWith('/api/outlive/fs')
             ? { path: '/usr/local/bin', entries: [{ name: 'opencode', path: '/usr/local/bin/opencode', dir: false, executable: true }], places: [{ label: 'Home', path: '/home/dev' }] }
             : {}
     return { ok: true, status: 200, text: async () => JSON.stringify(body) }
@@ -285,9 +285,9 @@ test('client bundle registers the panel, the sidebar entry and the trigger sourc
     assert.match(flat, /Unit mode/, 'the restart card shows the detected plan')
     assert.match(flat, /Gemini CLI/, 'the agents card lists detected agents')
     assert.match(flat, /Needs arguments|需补参数/, 'an agent without arguments is flagged')
-    const leaked = out.text.filter((text) => KEY_LIKE.test(text) && !/^(https?|usr|home|tmp|__outlive)/.test(text))
+    const leaked = out.text.filter((text) => KEY_LIKE.test(text) && !/^(https?|usr|home|tmp|api)/.test(text))
     assert.deepEqual(leaked, [], `unresolved locale keys: ${leaked.join(', ')}`)
-    assert.ok(fetched.some((call) => call.url === '/__outlive/state'), 'the panel loads its snapshot')
+    assert.ok(fetched.some((call) => call.url === '/api/outlive/state'), 'the panel loads its snapshot')
   } finally {
     globalThis.setInterval = realSetInterval
     globalThis.clearInterval = realClearInterval

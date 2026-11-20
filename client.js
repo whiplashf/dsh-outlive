@@ -624,7 +624,7 @@ window.__ModuleLoader__.load({
           setError(null)
           try {
             const query = new URLSearchParams({ path: target || '', showHidden: showHidden ? '1' : '0', executablesOnly: executablesOnly ? '1' : '0' })
-            const result = await request(`/__outlive/fs?${query}`)
+            const result = await request(`/api/outlive/fs?${query}`)
             setData(result)
             setPath(result.path)
             setSelected(null)
@@ -781,7 +781,7 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError(null)
         try {
-          await request('/__outlive/agents', {
+          await request('/api/outlive/agents', {
             method: 'POST',
             body: { name: form.name.trim(), label: form.label.trim(), bin: form.bin, args: form.args },
           })
@@ -799,7 +799,7 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError(null)
         try {
-          await request('/__outlive/agents/delete', { method: 'POST', body: { name } })
+          await request('/api/outlive/agents/delete', { method: 'POST', body: { name } })
           setConfirmRemove(null)
           notify(t('settings.removed'), 'ok')
           onChanged()
@@ -813,7 +813,7 @@ window.__ModuleLoader__.load({
       const restore = async () => {
         setBusy(true)
         try {
-          await request('/__outlive/tasks/restore', { method: 'POST', body: { key: 'restart-dsh' } })
+          await request('/api/outlive/tasks/restore', { method: 'POST', body: { key: 'restart-dsh' } })
           notify(t('notice.restored'), 'ok')
           onChanged()
         } catch (err) {
@@ -1068,7 +1068,7 @@ window.__ModuleLoader__.load({
 
       const loadPlan = useCallback(async () => {
         try {
-          const result = await request('/__outlive/preview', { method: 'POST', body: { kind: 'restart' } })
+          const result = await request('/api/outlive/preview', { method: 'POST', body: { kind: 'restart' } })
           setPlan(result)
         } catch {
           setPlan(null)
@@ -1090,7 +1090,7 @@ window.__ModuleLoader__.load({
             tab === 'command'
               ? { kind: 'command', command }
               : { kind: 'agent', task, agent, label }
-          const result = await request('/__outlive/preview', { method: 'POST', body })
+          const result = await request('/api/outlive/preview', { method: 'POST', body })
           setPreview(result.command || '')
           setPreviewOpen(true)
         } catch (err) {
@@ -1108,7 +1108,7 @@ window.__ModuleLoader__.load({
         setError(null)
         try {
           if (alsoSave) {
-            await request('/__outlive/tasks', {
+            await request('/api/outlive/tasks', {
               method: 'POST',
               body:
                 tab === 'command'
@@ -1120,7 +1120,7 @@ window.__ModuleLoader__.load({
             return
           }
           if (tab === 'restart') {
-            const result = await request('/__outlive/run', { method: 'POST', body: { kind: 'restart', lang } })
+            const result = await request('/api/outlive/run', { method: 'POST', body: { kind: 'restart', lang } })
             if (result.error) {
               setError(errorMessage(t, asError(result)))
             } else {
@@ -1133,7 +1133,7 @@ window.__ModuleLoader__.load({
             tab === 'command'
               ? { kind: 'command', command, label, cwd, runtime_max_sec: runtime, lang }
               : { kind: 'agent', task, agent, label, cwd, runtime_max_sec: runtime, lang }
-          const result = await request('/__outlive/run', { method: 'POST', body })
+          const result = await request('/api/outlive/run', { method: 'POST', body })
           if (result.error) {
             setError(errorMessage(t, asError(result)))
           } else {
@@ -1396,7 +1396,7 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         let alive = true
-        request('/__outlive/preview', { method: 'POST', body: { kind: 'restart' } })
+        request('/api/outlive/preview', { method: 'POST', body: { kind: 'restart' } })
           .then((result) => {
             if (alive) setRestartPlan(result)
           })
@@ -1543,7 +1543,7 @@ window.__ModuleLoader__.load({
       const load = async () => {
         state = { ...(state || {}), loading: true }
         try {
-          const data = await request('/__outlive/state')
+          const data = await request('/api/outlive/state')
           state = { data, error: null, loading: false, updatedAt: Date.now() }
         } catch (error) {
           state = { ...(state || {}), error, loading: false }
@@ -1554,7 +1554,7 @@ window.__ModuleLoader__.load({
 
       const runAction = async (body, successKey, notify, extra) => {
         try {
-          const result = await request('/__outlive/run', { method: 'POST', body })
+          const result = await request('/api/outlive/run', { method: 'POST', body })
           if (result.error) {
             notify(errorMessage(t, { code: result.error, detail: typeof result.detail === 'string' ? result.detail : '' }), 'error')
             return null
@@ -1612,7 +1612,7 @@ window.__ModuleLoader__.load({
 
         const loadLog = useCallback(async (job) => {
           try {
-            const result = await request(`/__outlive/log?id=${encodeURIComponent(job.id)}&tail=300`)
+            const result = await request(`/api/outlive/log?id=${encodeURIComponent(job.id)}&tail=300`)
             setLogs((current) => ({ ...current, [job.id]: result.log || '' }))
           } catch {
             setLogs((current) => ({ ...current, [job.id]: '' }))
@@ -1622,7 +1622,7 @@ window.__ModuleLoader__.load({
         const cancelJob = async (job) => {
           setBusy(true)
           try {
-            await request('/__outlive/cancel', { method: 'POST', body: { id: job.id } })
+            await request('/api/outlive/cancel', { method: 'POST', body: { id: job.id } })
             notify(translate('notice.cancelled'), 'ok')
             await load()
           } catch (error) {
@@ -1635,7 +1635,7 @@ window.__ModuleLoader__.load({
         const deleteJob = async (job) => {
           setBusy(true)
           try {
-            await request('/__outlive/delete', { method: 'POST', body: { id: job.id } })
+            await request('/api/outlive/delete', { method: 'POST', body: { id: job.id } })
             setLogs((current) => {
               const next = { ...current }
               delete next[job.id]
@@ -1653,7 +1653,7 @@ window.__ModuleLoader__.load({
         const clearJobs = async () => {
           setBusy(true)
           try {
-            await request('/__outlive/jobs/clear', { method: 'POST', body: {} })
+            await request('/api/outlive/jobs/clear', { method: 'POST', body: {} })
             notify(translate('notice.cleared'), 'ok')
             await load()
           } catch (error) {
@@ -1681,7 +1681,7 @@ window.__ModuleLoader__.load({
         const deleteSaved = async (task) => {
           setBusy(true)
           try {
-            await request('/__outlive/tasks/delete', { method: 'POST', body: { id: task.id } })
+            await request('/api/outlive/tasks/delete', { method: 'POST', body: { id: task.id } })
             notify(translate('notice.taskDeleted'), 'ok')
             await load()
           } catch (error) {
@@ -1694,7 +1694,7 @@ window.__ModuleLoader__.load({
         const restoreBuiltin = async () => {
           setBusy(true)
           try {
-            await request('/__outlive/tasks/restore', { method: 'POST', body: { key: 'restart-dsh' } })
+            await request('/api/outlive/tasks/restore', { method: 'POST', body: { key: 'restart-dsh' } })
             notify(translate('notice.restored'), 'ok')
             await load()
           } catch (error) {

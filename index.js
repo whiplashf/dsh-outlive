@@ -547,76 +547,54 @@ export function apply(ctx, config = {}) {
 
   // ---- HTTP panel API -----------------------------------------------------
 
-  function send(res, status, body, type = 'application/json; charset=utf-8') {
+  function jsonResponse(status, body) {
     const payload = typeof body === 'string' ? body : JSON.stringify(body)
-    res.statusCode = status
-    res.setHeader('content-type', type)
-    res.setHeader('cache-control', 'no-store')
-    res.setHeader('content-length', Buffer.byteLength(payload))
-    res.end(payload)
-  }
-
-  function readBody(req) {
-    return new Promise((resolve, reject) => {
-      let size = 0
-      const chunks = []
-      req.on('data', (chunk) => {
-        size += chunk.length
-        if (size > MAX_BODY) {
-          reject(Object.assign(new Error('body too large'), { status: 413 }))
-          req.destroy()
-          return
-        }
-        chunks.push(chunk)
-      })
-      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-      req.on('error', reject)
+    return new Response(payload, {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
     })
   }
 
-  async function readJson(req) {
-    const type = String(req.headers['content-type'] || '')
-    if (!type.includes('application/json')) throw Object.assign(new Error('content-type must be application/json'), { status: 415 })
-    const raw = await readBody(req)
-    try {
-      const value = JSON.parse(raw)
-      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('body must be an object')
-      return value
-    } catch {
-      throw Object.assign(new Error('invalid JSON'), { status: 400 })
-    }
-  }
-
-  function post(handler) {
-    return async (req, res) => {
-      if (req.headers['x-outlive'] !== '1') return send(res, 403, { error: 'forbidden', detail: 'missing x-outlive header' })
-      try {
-        const body = await readJson(req)
-        const result = await handler(body, req, res)
-        if (!res.writableEnded) send(res, 200, result ?? { ok: true })
-      } catch (error) {
-        const status = error?.status || 500
-        send(res, status, {
-          error: error?.code || (status === 500 ? 'internal' : 'badRequest'),
-          detail: String(error?.message || error).slice(0, 1000),
-        })
-      }
-    }
+  function failure(error) {
+    const status = error?.status || 500
+    return jsonResponse(status, {
+      error: error?.code || (status === 500 ? 'internal' : 'badRequest'),
+      detail: String(error?.message || error).slice(0, 1000),
+    })
   }
 
   function get(handler) {
-    return async (req, res) => {
-      try {
-        const url = new URL(req.url, 'http://localhost')
-        const result = await handler(url, req)
-        if (!res.writableEnded) send(res, 200, result ?? { ok: true })
-      } catch (error) {
-        const status = error?.status || 500
-        send(res, status, {
-          error: error?.code || (status === 500 ? 'internal' : 'badRequest'),
-          detail: String(error?.message || error).slice(0, 1000),
-        })
+    return { method: 'GET', handler }
+  }
+
+  function post(handler) {
+    return { method: 'POST', handler }
+  }
+
+  /** Answer one panel request; the transport has already applied its trust and authentication policy. */
+  async function dispatch(route, request) {
+    try {
+      const url = new URL(request.url)
+      if (route.method === 'GET') return jsonResponse(200, (await route.handler(url)) ?? { ok: true })
+      if (request.headers.get('x-outlive') !== '1') return jsonResponse(403, { error: 'forbidden', detail: 'missing x-outlive header' })
+      const type = String(request.headers.get('content-type') || '')
+      if (!type.includes('application/json')) {
+        return jsonResponse(415, { error: 'unsupportedMediaType', detail: 'content-type must be application/json' })
       }
+      const raw = await request.text()
+      if (raw.length > MAX_BODY) return jsonResponse(413, { error: 'bodyTooLarge', detail: `body exceeds ${MAX_BODY} bytes` })
+      let body
+      try {
+        body = JSON.parse(raw || '{}')
+      } catch {
+        return jsonResponse(400, { error: 'badRequest', detail: 'invalid JSON' })
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return jsonResponse(400, { error: 'badRequest', detail: 'body must be an object' })
+      }
+      return jsonResponse(200, (await route.handler(body)) ?? { ok: true })
+    } catch (error) {
+      return failure(error)
     }
   }
 
@@ -641,14 +619,14 @@ export function apply(ctx, config = {}) {
 
   const routes = [
     [
-      '/__outlive/state',
+      '/api/outlive/state',
       get((url) => {
         if (url.searchParams.get('refresh') === '1') catalog.list({ refresh: true })
         return statePayload()
       }),
     ],
     [
-      '/__outlive/log',
+      '/api/outlive/log',
       get((url) => {
         const id = String(url.searchParams.get('id') || '')
         if (!JOB_ID.test(id)) throw Object.assign(new Error('invalid job id'), { status: 400 })
@@ -659,7 +637,7 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/fs',
+      '/api/outlive/fs',
       get((url) => {
         const result = browse({
           path: url.searchParams.get('path') || '',
@@ -671,7 +649,7 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/run',
+      '/api/outlive/run',
       post((body) => {
         const kind = body.kind === 'command' ? 'command' : body.kind === 'restart' ? 'restart' : 'agent'
         const lang = pickLang(body.lang)
@@ -706,7 +684,7 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/cancel',
+      '/api/outlive/cancel',
       post((body) => {
         const id = String(body.id || '')
         if (!JOB_ID.test(id)) throw Object.assign(new Error('invalid job id'), { status: 400 })
@@ -726,7 +704,7 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/delete',
+      '/api/outlive/delete',
       post((body) => {
         const id = String(body.id || '')
         if (!JOB_ID.test(id)) throw Object.assign(new Error('invalid job id'), { status: 400 })
@@ -737,11 +715,11 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/jobs/clear',
+      '/api/outlive/jobs/clear',
       post(() => store.clearSettled()),
     ],
     [
-      '/__outlive/agents',
+      '/api/outlive/agents',
       post((body) => {
         const checked = validateCustomAgent(body)
         if (checked.error) throw Object.assign(new Error(checked.error), { status: 400 })
@@ -757,7 +735,7 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/agents/delete',
+      '/api/outlive/agents/delete',
       post((body) => {
         const name = String(body.name || '').trim()
         if (!name) throw Object.assign(new Error('name is required'), { status: 400 })
@@ -767,7 +745,7 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/tasks',
+      '/api/outlive/tasks',
       post((body) => {
         const kind = body.kind === 'command' ? 'command' : 'agent'
         const result = store.saveTask({
@@ -783,7 +761,7 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/tasks/delete',
+      '/api/outlive/tasks/delete',
       post((body) => {
         const id = String(body.id || '')
         if (!TASK_ID.test(id)) throw Object.assign(new Error('invalid task id'), { status: 400 })
@@ -793,7 +771,7 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/tasks/restore',
+      '/api/outlive/tasks/restore',
       post((body) => {
         const key = String(body.key || '')
         const result = store.restoreBuiltin(key)
@@ -802,7 +780,7 @@ export function apply(ctx, config = {}) {
       }),
     ],
     [
-      '/__outlive/preview',
+      '/api/outlive/preview',
       post((body) => {
         const kind = body.kind === 'command' ? 'command' : body.kind === 'restart' ? 'restart' : 'agent'
         if (kind === 'restart') {
@@ -827,9 +805,20 @@ export function apply(ctx, config = {}) {
     ],
   ]
 
-  ctx.inject(['webServer'], (web) => {
-    for (const [path, handler] of routes) {
-      web.effect(() => web.webServer.register({ kind: 'exact', path, handler }))
+  ctx.inject(['connection'], (conn) => {
+    for (const [path, route] of routes) {
+      conn.effect(
+        () =>
+          conn.connection.fetch.register({
+            path,
+            methods: [route.method],
+            // The carrier only turns a body-less request into a body-less `Request`
+            // for `buffered`; `none` would stream an empty GET body and throw.
+            requestBody: 'buffered',
+            fetch: (request) => dispatch(route, request),
+          }),
+        `outlive: ${path}`,
+      )
     }
   })
 

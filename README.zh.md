@@ -5,7 +5,7 @@
 同时内置了大多数安装真正需要的那件运维任务：**重启 DSH Web**。无论 `dsh` 是否被 systemd 托管，重启都能正确完成。
 
 ```
-浏览器面板 ──▶ /__outlive/* ──▶ systemd-run --user --unit=outlive-<job>
+浏览器面板 ──▶ /api/outlive/* ──▶ systemd-run --user --unit=outlive-<job>
                                         │
    日志 + exit 标记 ◀── out.log / exit ─┘
 ```
@@ -128,7 +128,8 @@ $OUTLIVE_HOME
 
 ## 安全
 
-- 面板 API 只接受带 `x-outlive: 1` 头的请求；跨站表单或 fetch 无法在不触发预检的情况下加这个头，而服务端从不响应预检。
+- 面板 API 挂在 DSH 自带的已认证 `/api` 通道上，因此继承宿主自己的浏览器会话检查：没有有效会话的请求在到达 Outlive 之前就被拒绝（`401`），非 owner 的对端得到 `403`。
+- 每个写操作还额外要求 `x-outlive: 1` 头与 JSON 内容类型；跨站表单加不了这个头，跨站的 JSON `fetch` 会触发服务端从不回应的预检。
 - 文件浏览是只读的，只接受绝对路径，单次最多 1000 条。
 - 任务脚本与任务文件位于状态目录内，权限 `0600`/`0700`。
 - Agent 任务只继承一份很窄的环境变量白名单（路径、locale、代理、常见 `*_API_KEY`），宿主进程的其他变量不会泄进 unit。

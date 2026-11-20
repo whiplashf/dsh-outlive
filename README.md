@@ -5,7 +5,7 @@ Run coding agents and shell commands **outside** the DSH session, in a transient
 It also ships the one operational task most installations need: **Restart DSH Web**, with a restart path that works whether or not systemd supervises `dsh`.
 
 ```
-browser panel ──▶ /__outlive/* ──▶ systemd-run --user --unit=outlive-<job>
+browser panel ──▶ /api/outlive/* ──▶ systemd-run --user --unit=outlive-<job>
                                             │
       log + exit marker ◀── out.log / exit ─┘
 ```
@@ -128,7 +128,8 @@ $OUTLIVE_HOME
 
 ## Security
 
-- The panel API only accepts requests carrying `x-outlive: 1`; a cross-origin form or fetch cannot set it without a preflight the server never answers.
+- The panel API lives on DSH's authenticated `/api` channel, so it inherits the host's own browser-session gate: a request without a valid session gets `401` and a non-owner peer gets `403` before Outlive sees it.
+- Every state-changing call also needs `x-outlive: 1` and a JSON content type; a cross-origin form cannot send the header, and a cross-origin JSON `fetch` triggers a preflight the server never answers.
 - The file browser is read-only, absolute paths only, capped at 1000 entries.
 - Job scripts and the task file are `0600`/`0700` under the state directory.
 - An agent job inherits a small allowlist of environment variables (paths, locale, proxy, and common `*_API_KEY` names); nothing else from the host process leaks into the unit.

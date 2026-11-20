@@ -9,7 +9,7 @@ Users must point the plugin at an agent executable. The obvious interface is a t
 
 ## Decision
 
-The host exposes a read-only directory-listing route (`/__outlive/fs`) and the panel renders its own file dialog: breadcrumb, quick locations, filter, hidden-file toggle, executables-only default, and double-click navigation. The chosen path is displayed read-only in the form. The user never types an executable path.
+The host exposes a read-only directory-listing route (`/api/outlive/fs`) and the panel renders its own file dialog: breadcrumb, quick locations, filter, hidden-file toggle, executables-only default, and double-click navigation. The chosen path is displayed read-only in the form. The user never types an executable path.
 
 The same dialog, in directory mode, selects a job's working directory.
 

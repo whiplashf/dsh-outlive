@@ -25,6 +25,7 @@ First public release. The plugin was rewritten around the release requirements r
 
 **Changed**
 
+- The panel API moved from public `/__outlive/*` routes to `/api/outlive/*` on DSH's authenticated connection channel, so it inherits the host's browser-session gate (`401` without a session, `403` for a non-owner peer) instead of relying on a custom header alone.
 - The panel is a centered column (max 1120 px) with a side column instead of full-width rows with controls pinned to the viewport edge.
 - Panel copy is written as product copy: no debug output, no chatty hints.
 - Custom agents replace a preset of the same name instead of being shadowed by it.

@@ -3,51 +3,58 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Readable } from 'node:stream'
 import * as plugin from '../index.js'
 
 function makeCtx() {
   const tools = new Map()
   const routes = new Map()
-  let dispose = null
+  const disposers = []
   const ctx = {
     tools: { register(tool) { tools.set(tool.name, tool) } },
-    effect(fn) { dispose = fn(); return dispose },
+    effect(fn) {
+      const dispose = fn()
+      if (typeof dispose === 'function') disposers.push(dispose)
+      return dispose
+    },
     on() {},
     off() {},
     inject(deps, callback) {
-      if (!deps.includes('webServer')) return
+      if (!deps.includes('connection')) return
       callback({
-        effect(fn) { fn() },
-        webServer: { register(route) { routes.set(route.path, route.handler) } },
+        effect(fn) {
+          const dispose = fn()
+          if (typeof dispose === 'function') disposers.push(dispose)
+          return dispose
+        },
+        connection: {
+          fetch: {
+            register(route) {
+              routes.set(route.path, route)
+              return Promise.resolve(async () => {
+                routes.delete(route.path)
+              })
+            },
+          },
+        },
       })
     },
   }
-  return { ctx, tools, routes, dispose: () => dispose?.() }
+  return { ctx, tools, routes, dispose: () => { for (const fn of disposers) fn() } }
 }
 
-function invoke(handler, { method = 'GET', url = '/', headers = {}, body } = {}) {
-  return new Promise((resolve) => {
-    const req = new Readable({ read() {} })
-    req.method = method
-    req.url = url
-    req.headers = headers
-    let statusCode = 0
-    const responseHeaders = {}
-    const res = {
-      writableEnded: false,
-      get statusCode() { return statusCode },
-      set statusCode(value) { statusCode = value },
-      setHeader(key, value) { responseHeaders[key.toLowerCase()] = value },
-      end(payload) {
-        this.writableEnded = true
-        resolve({ status: statusCode, headers: responseHeaders, body: payload ? JSON.parse(payload) : null })
-      },
-    }
-    handler(req, res)
-    if (body !== undefined) req.push(JSON.stringify(body))
-    req.push(null)
+/** Invoke one panel route the way the authenticated `/api` carrier does. */
+async function invoke(routes, path, { method = 'GET', headers = {}, body, query } = {}) {
+  const route = routes.get(path)
+  assert.ok(route, `route ${path} is registered`)
+  const search = query ? `?${query}` : ''
+  const request = new Request(`http://harness.test${path}${search}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
   })
+  const response = await route.fetch(request)
+  const text = await response.text()
+  return { status: response.status, headers: Object.fromEntries(response.headers), body: text ? JSON.parse(text) : null }
 }
 
 function fixture() {
@@ -72,7 +79,7 @@ test('plugin exports the expected name and tools', async () => {
       'outlive_run',
       'outlive_status',
     ])
-    const state = await invoke(api.routes.get('/__outlive/state'))
+    const state = await invoke(api.routes, '/api/outlive/state')
     assert.equal(state.status, 200)
     assert.equal(state.body.stateDir, api.stateDir)
     assert.equal(state.body.version, '1.0.0')
@@ -86,10 +93,10 @@ test('plugin exports the expected name and tools', async () => {
 test('panel POST routes require the x-outlive header', async () => {
   const api = fixture()
   try {
-    const denied = await invoke(api.routes.get('/__outlive/run'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: {} })
+    const denied = await invoke(api.routes, '/api/outlive/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: {} })
     assert.equal(denied.status, 403)
     assert.equal(denied.body.error, 'forbidden')
-    const badType = await invoke(api.routes.get('/__outlive/run'), { method: 'POST', headers: { 'x-outlive': '1' }, body: {} })
+    const badType = await invoke(api.routes, '/api/outlive/run', { method: 'POST', headers: { 'x-outlive': '1' }, body: {} })
     assert.equal(badType.status, 415)
   } finally {
     api.stop()
@@ -99,7 +106,7 @@ test('panel POST routes require the x-outlive header', async () => {
 test('file browser rejects relative paths through the API', async () => {
   const api = fixture()
   try {
-    const result = await invoke(api.routes.get('/__outlive/fs'), { url: '/__outlive/fs?path=relative' })
+    const result = await invoke(api.routes, '/api/outlive/fs', { query: 'path=relative' })
     assert.equal(result.status, 404)
     assert.equal(result.body.error, 'invalidPath')
   } finally {
@@ -110,7 +117,7 @@ test('file browser rejects relative paths through the API', async () => {
 test('saved tasks round-trip and the built-in can be removed and restored', async () => {
   const api = fixture()
   try {
-    const saved = await invoke(api.routes.get('/__outlive/tasks'), {
+    const saved = await invoke(api.routes, '/api/outlive/tasks', {
       method: 'POST',
       headers: post(),
       body: { kind: 'agent', task: 'review the diff', agent: 'auto', label: 'Review' },
@@ -118,22 +125,22 @@ test('saved tasks round-trip and the built-in can be removed and restored', asyn
     assert.equal(saved.status, 200)
     assert.ok(saved.body.task.id)
 
-    const removed = await invoke(api.routes.get('/__outlive/tasks/delete'), {
+    const removed = await invoke(api.routes, '/api/outlive/tasks/delete', {
       method: 'POST',
       headers: post(),
       body: { id: 'builtin-restart-dsh' },
     })
     assert.equal(removed.status, 200)
-    const afterRemove = await invoke(api.routes.get('/__outlive/state'))
+    const afterRemove = await invoke(api.routes, '/api/outlive/state')
     assert.deepEqual(afterRemove.body.builtins.removed, ['restart-dsh'])
 
-    const restored = await invoke(api.routes.get('/__outlive/tasks/restore'), {
+    const restored = await invoke(api.routes, '/api/outlive/tasks/restore', {
       method: 'POST',
       headers: post(),
       body: { key: 'restart-dsh' },
     })
     assert.equal(restored.status, 200)
-    const afterRestore = await invoke(api.routes.get('/__outlive/state'))
+    const afterRestore = await invoke(api.routes, '/api/outlive/state')
     assert.deepEqual(afterRestore.body.builtins.removed, [])
     assert.ok(afterRestore.body.tasks.some((task) => task.id === 'builtin-restart-dsh'))
     assert.ok(afterRestore.body.tasks.some((task) => task.label === 'Review'))
@@ -145,7 +152,7 @@ test('saved tasks round-trip and the built-in can be removed and restored', asyn
 test('run rejects an unknown agent and a missing working directory', async () => {
   const api = fixture()
   try {
-    const unknown = await invoke(api.routes.get('/__outlive/run'), {
+    const unknown = await invoke(api.routes, '/api/outlive/run', {
       method: 'POST',
       headers: post(),
       body: { kind: 'agent', task: 'do it', agent: 'definitely-missing', label: 'x' },
@@ -153,7 +160,7 @@ test('run rejects an unknown agent and a missing working directory', async () =>
     assert.equal(unknown.status, 200)
     assert.equal(unknown.body.error, 'unknown')
 
-    const badCwd = await invoke(api.routes.get('/__outlive/run'), {
+    const badCwd = await invoke(api.routes, '/api/outlive/run', {
       method: 'POST',
       headers: post(),
       body: { kind: 'command', command: 'true', cwd: '/definitely/missing', label: 'x' },
