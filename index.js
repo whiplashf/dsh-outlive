@@ -661,14 +661,22 @@ function detectedEngines(config, { refresh = false } = {}) {
       custom: entry.custom === true,
     })
   }
-  // built-ins first, then hand-added ones, then anything a config function added
-  for (const name of PREFERRED_ENGINES) {
-    if (BUILTIN_ENGINES[name]) push({ ...BUILTIN_ENGINES[name], name })
+  // Built-ins first, in preference order. A hand-added agent with the same name
+  // *overrides* the built-in (that is how you change its flags without a code
+  // change) instead of being shadowed by it.
+  const saved = readAgents()
+  const override = (name) => saved.find((agent) => agent.name === name)
+  for (const name of [...PREFERRED_ENGINES, ...Object.keys(BUILTIN_ENGINES)]) {
+    const builtin = BUILTIN_ENGINES[name]
+    if (!builtin) continue
+    const mine = override(name)
+    push(mine
+      ? { ...mine, custom: true, label: mine.label || builtin.label }
+      : { ...builtin, name })
   }
-  for (const name of Object.keys(BUILTIN_ENGINES)) {
-    if (!PREFERRED_ENGINES.includes(name)) push({ ...BUILTIN_ENGINES[name], name })
+  for (const agent of saved) {
+    if (!BUILTIN_ENGINES[agent.name]) push({ ...agent, custom: true })
   }
-  for (const agent of readAgents()) push({ ...agent, custom: true })
   const extra = config?.engines && typeof config.engines === 'object' ? config.engines : {}
   for (const [name, build] of Object.entries(extra)) {
     if (typeof build === 'function') push({ name, label: name, bin: name, custom: false })
@@ -679,10 +687,10 @@ function detectedEngines(config, { refresh = false } = {}) {
 
 /** How to run one engine by name — built-in preset, hand-added agent, or config fn. */
 function engineBuild(name) {
-  const builtin = BUILTIN_ENGINES[name]
-  if (builtin) return builtin.build
   const saved = readAgents().find((agent) => agent.name === name)
   if (saved) return (file, title) => agentCommand(saved.bin, saved.args, file, title)
+  const builtin = BUILTIN_ENGINES[name]
+  if (builtin) return builtin.build
   return undefined
 }
 
