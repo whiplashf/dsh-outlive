@@ -20,7 +20,7 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -76,6 +76,124 @@ function patchJob(id, patch) {
   const next = { ...current, ...patch }
   writeJob(next)
   return next
+}
+
+// ---------------------------------------------------------------------------
+// saved tasks — the panel's "常用任务" list, on disk next to the jobs
+// ---------------------------------------------------------------------------
+
+const TASKS_PATH = join(STATE_DIR, 'tasks.json')
+const MAX_TASKS = 40
+
+/** Read the saved-task list, dropping anything a hand edit left malformed. */
+function readTasks() {
+  const value = readJson(TASKS_PATH, undefined)
+  const list = Array.isArray(value && value.tasks) ? value.tasks : []
+  return list.filter((task) => task
+    && typeof task.id === 'string'
+    && typeof task.command === 'string'
+    && task.command.trim() !== '')
+}
+
+function writeTasks(tasks) {
+  writeFileSync(TASKS_PATH, `${JSON.stringify({ tasks }, null, 2)}\n`)
+}
+
+/** Content-addressed id: saving the same command twice updates one row. */
+function taskKey(command) {
+  return createHash('sha256').update(String(command)).digest('hex').slice(0, 12)
+}
+
+/**
+ * Save or update one task.
+ *
+ * Identity is the command text, so re-saving an edited label keeps one row
+ * instead of growing a duplicate with the same meaning.
+ */
+function saveTask({ label, command, cwd }) {
+  const text = String(command ?? '').trim()
+  if (!text) return undefined
+  const tasks = readTasks()
+  const id = taskKey(text)
+  const now = new Date().toISOString()
+  const existing = tasks.find((task) => task.id === id)
+  const next = {
+    id,
+    command: text,
+    label: String(label ?? '').trim() || existing?.label || text.split('\n')[0].slice(0, 60),
+    cwd: String(cwd ?? '').trim() || existing?.cwd || '',
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    runCount: existing?.runCount ?? 0,
+    lastRunAt: existing?.lastRunAt,
+  }
+  const rest = tasks.filter((task) => task.id !== id)
+  rest.unshift(next)
+  writeTasks(rest.slice(0, MAX_TASKS))
+  return next
+}
+
+function dropTask(id) {
+  const tasks = readTasks()
+  const kept = tasks.filter((task) => task.id !== id)
+  writeTasks(kept)
+  return kept.length !== tasks.length
+}
+
+function bumpTask(id, jobId) {
+  const tasks = readTasks()
+  const task = tasks.find((entry) => entry.id === id)
+  if (!task) return undefined
+  task.runCount = (task.runCount ?? 0) + 1
+  task.lastRunAt = new Date().toISOString()
+  writeTasks(tasks)
+  return jobId
+}
+
+/** Collect one JSON request body, bounded — these routes are small by design. */
+function readBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error('请求体过大'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('error', reject)
+  })
+}
+
+/**
+ * The panel's write routes require this header.
+ *
+ * The gate already authenticates the human; this is the second, cheaper lock:
+ * a form post from some other origin cannot set a custom header without a
+ * preflight the panel never grants.
+ */
+function fromPanel(req) {
+  return String(req.headers['x-outlive'] || '') === '1'
+}
+
+async function readPanelJson(req, res) {
+  if (!fromPanel(req)) {
+    sendJson(res, 403, { error: '缺少 x-outlive 头' })
+    return undefined
+  }
+  const raw = await readBody(req)
+  if (raw.trim() === '') return {}
+  try {
+    const value = JSON.parse(raw)
+    return value && typeof value === 'object' ? value : {}
+  } catch {
+    sendJson(res, 400, { error: '请求体不是 JSON' })
+    return undefined
+  }
 }
 
 function tail(path, lines) {
@@ -592,6 +710,66 @@ export function apply(ctx, config = {}) {
         if (!job) return sendJson(res, 404, { error: `没有任务 ${id}` })
         const lines = Math.min(MAX_TAIL_LINES, Math.max(1, Math.trunc(Number(url.searchParams.get('tail')) || 200)))
         sendText(res, 200, tail(join(jobDir(id), 'out.log'), lines) || '（暂无输出）')
+      },
+    }))
+    // The three surfaces the user asked for from the panel: detect engines
+    // again on demand, keep a short list of tasks worth repeating, and start
+    // one without going through the model.
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: '/__outlive/engines',
+      handler(req, res) {
+        const url = new URL(req.url || '/', 'http://localhost')
+        const refresh = url.searchParams.get('refresh') === '1'
+        sendJson(res, 200, {
+          engines: detectedEngines(config, { refresh }),
+          defaultEngine: resolvedDefault(config),
+        })
+      },
+    }))
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: '/__outlive/tasks',
+      async handler(req, res) {
+        if ((req.method || 'GET').toUpperCase() === 'GET') {
+          return sendJson(res, 200, { tasks: readTasks() })
+        }
+        const body = await readPanelJson(req, res)
+        if (body === undefined) return undefined
+        const task = saveTask({ label: body.label, command: body.command, cwd: body.cwd })
+        if (!task) return sendJson(res, 400, { error: 'command 不能为空' })
+        return sendJson(res, 200, { task, tasks: readTasks() })
+      },
+    }))
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: '/__outlive/tasks/delete',
+      async handler(req, res) {
+        const body = await readPanelJson(req, res)
+        if (body === undefined) return undefined
+        const id = String(body.id || '')
+        if (!/^[0-9a-f]{12}$/.test(id)) return sendJson(res, 400, { error: 'id 不合法' })
+        return sendJson(res, 200, { removed: dropTask(id), tasks: readTasks() })
+      },
+    }))
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: '/__outlive/run',
+      async handler(req, res) {
+        const body = await readPanelJson(req, res)
+        if (body === undefined) return undefined
+        const command = String(body.command ?? '').trim()
+        if (!command) return sendJson(res, 400, { error: 'command 不能为空' })
+        const { job, error } = await dispatch({
+          kind: 'run',
+          command,
+          cwd: String(body.cwd ?? '').trim() || undefined,
+          label: String(body.label ?? '').trim() || undefined,
+          runtimeMaxSec: runtimeMax(body.runtime_max_sec),
+        })
+        if (error) return sendJson(res, 500, { error })
+        if (body.taskId) bumpTask(String(body.taskId), job.id)
+        return sendJson(res, 200, { id: job.id, unit: job.unit })
       },
     }))
   })
