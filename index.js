@@ -18,7 +18,7 @@
  *   record   — the on-disk job directory, which is the source of truth
  */
 
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -385,15 +385,171 @@ function runtimeMax(value) {
   return Number.isFinite(value) ? Math.max(1, Math.trunc(value)) : DEFAULT_RUNTIME_MAX_SEC
 }
 
-/** Registered executors. A config entry wins over the built-in. */
-function agentCommand(engine, taskFile, title, config) {
-  const engines = {
-    opencode: (file) => 'OC=$(command -v opencode || echo /usr/local/nodejs/bin/opencode)\n'
-      + `exec "$OC" run --standalone --auto --archived --title ${shellQuote(title)} -- "$(cat ${shellQuote(file)})"`,
-    ...(config?.engines || {}),
+/**
+ * Built-in executors, best first. Each `build` returns a shell snippet rather
+ * than an argv: the runner is a shell script, and reading the task out of its
+ * file keeps user text away from any quoting boundary.
+ *
+ * Every one of them is started non-interactively and pre-authorized, because
+ * there is no human at the other end to answer a prompt.
+ */
+const BUILTIN_ENGINES = {
+  opencode: {
+    label: 'OpenCode',
+    bin: 'opencode',
+    versionArgs: ['--version'],
+    build: (file, title) => 'exec "$(command -v opencode || echo /usr/local/nodejs/bin/opencode)"'
+      + ` run --standalone --auto --archived --title ${shellQuote(title)} -- "$(cat ${shellQuote(file)})"`,
+  },
+  codex: {
+    label: 'Codex',
+    bin: 'codex',
+    versionArgs: ['--version'],
+    build: (file) => 'exec "$(command -v codex || echo /usr/local/nodejs/bin/codex)"'
+      + ` exec --skip-git-repo-check -s workspace-write -- "$(cat ${shellQuote(file)})"`,
+  },
+  claude: {
+    label: 'Claude Code',
+    bin: 'claude',
+    versionArgs: ['--version'],
+    build: (file) => 'exec "$(command -v claude || echo /usr/local/nodejs/bin/claude)"'
+      + ` -p --dangerously-skip-permissions "$(cat ${shellQuote(file)})"`,
+  },
+}
+
+const PREFERRED_ENGINES = ['opencode', 'codex', 'claude']
+const ENGINE_CACHE_MS = 30_000
+
+function findBinary(bin) {
+  for (const dir of DEFAULT_PATH.split(':')) {
+    if (!dir) continue
+    const candidate = join(dir, bin)
+    if (existsSync(candidate)) return candidate
   }
-  const build = engines[engine]
-  return typeof build === 'function' ? build(taskFile, title) : undefined
+  return undefined
+}
+
+function binaryVersion(path, args) {
+  try {
+    const out = execFileSync(path, args, { timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
+    return String(out).trim().split('\n')[0].slice(0, 60)
+  } catch {
+    return ''
+  }
+}
+
+let engineCache
+
+/**
+ * What can actually run on this machine right now, in preference order.
+ * Detection is a PATH lookup plus a `--version`, so it is cached: a tool call
+ * should not pay three process spawns to learn nothing changed.
+ */
+function detectedEngines(config, { refresh = false } = {}) {
+  if (!refresh && engineCache && Date.now() - engineCache.at < ENGINE_CACHE_MS) return engineCache.list
+  const custom = config?.engines && typeof config.engines === 'object' ? config.engines : {}
+  const names = [...new Set([...PREFERRED_ENGINES, ...Object.keys(custom)])]
+  const list = []
+  for (const name of names) {
+    const builtin = BUILTIN_ENGINES[name]
+    const build = typeof custom[name] === 'function' ? custom[name] : builtin?.build
+    if (typeof build !== 'function') continue
+    const bin = builtin?.bin || name
+    const path = findBinary(bin)
+    if (!path) continue
+    list.push({
+      name,
+      label: builtin?.label || name,
+      bin: path,
+      version: builtin ? binaryVersion(path, builtin.versionArgs) : '',
+    })
+  }
+  engineCache = { at: Date.now(), list }
+  return list
+}
+
+/** Resolve `engine` to the snippet that runs it, or say why it cannot. */
+function resolveEngine(requested, config) {
+  const asked = String(requested || 'auto').trim() || 'auto'
+  const available = detectedEngines(config)
+  const pick = asked === 'auto'
+    ? available.find((engine) => engine.name === config?.defaultEngine) ?? available[0]
+    : available.find((engine) => engine.name === asked)
+  if (!pick) {
+    const known = [...new Set([...PREFERRED_ENGINES, ...Object.keys(config?.engines || {})])]
+    return asked === 'auto'
+      ? { error: `本机没检测到可用的编码 agent（找过 ${known.join(' / ')}）。` }
+      : { error: `执行器 "${asked}" 不可用。本机可用：${available.map((e) => e.name).join(', ') || '（无）'}` }
+  }
+  const custom = config?.engines?.[pick.name]
+  const build = typeof custom === 'function' ? custom : BUILTIN_ENGINES[pick.name].build
+  return { engine: pick, build }
+}
+
+// ---------------------------------------------------------------------------
+// panel: the small JSON surface the browser side (client.js) reads
+// ---------------------------------------------------------------------------
+
+/**
+ * A running job is shown as settled once its exit marker has content, but read
+ * here *without* writing: settling is the poll loop's job, and a panel refresh
+ * must never steal the one transition that owes the session a notice.
+ */
+function peekStatus(job) {
+  if (job.status !== 'running') return job
+  let raw
+  try {
+    raw = readFileSync(join(jobDir(job.id), 'exit'), 'utf8').trim()
+  } catch {
+    return job
+  }
+  if (raw === '') return job
+  const [codeText, atText] = raw.split(/\s+/)
+  const code = Number.parseInt(codeText, 10)
+  const at = Number.parseInt(atText, 10)
+  const exitCode = Number.isFinite(code) ? code : null
+  return {
+    ...job,
+    exitCode,
+    status: job.killed === true ? 'killed' : (exitCode === 0 ? 'completed' : 'failed'),
+    finishedAt: new Date(Number.isFinite(at) ? at : Date.now()).toISOString(),
+  }
+}
+
+function panelJob(job) {
+  const shown = peekStatus(job)
+  return {
+    id: shown.id,
+    status: shown.status,
+    kind: shown.kind,
+    engine: shown.engine || null,
+    label: shown.label,
+    cwd: shown.cwd || null,
+    startedAt: shown.startedAt,
+    finishedAt: shown.finishedAt || null,
+    exitCode: shown.exitCode ?? null,
+    error: shown.error || null,
+  }
+}
+
+function sendText(res, status, body, type = 'text/plain; charset=utf-8') {
+  if (res.headersSent) return
+  res.writeHead(status, {
+    'content-type': type,
+    'cache-control': 'no-store',
+    'content-length': Buffer.byteLength(body),
+  })
+  res.end(body)
+}
+
+function sendJson(res, status, value) {
+  sendText(res, status, JSON.stringify(value), 'application/json; charset=utf-8')
+}
+
+/** What `engine: 'auto'` would pick right now, for the panel header. */
+function resolvedDefault(config) {
+  const picked = resolveEngine('auto', config)
+  return picked.engine ? { name: picked.engine.name, label: picked.engine.label } : null
 }
 
 export function apply(ctx, config = {}) {
@@ -403,6 +559,38 @@ export function apply(ctx, config = {}) {
     ...definition,
     parameters: parameterSchema(definition.parameters),
   })
+
+  // The panel lives on the same origin as the page, so it rides the host web
+  // server instead of opening a port of its own. No secrets cross this line:
+  // job labels, statuses and the tail of a log the model can already read.
+  const webServer = ctx.get('webServer')
+  if (webServer?.register) {
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: '/__outlive/jobs',
+      handler(_req, res) {
+        sendJson(res, 200, {
+          engines: detectedEngines(config),
+          defaultEngine: resolvedDefault(config),
+          stateDir: STATE_DIR,
+          jobs: listJobs(undefined, false).map(panelJob),
+        })
+      },
+    }))
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: '/__outlive/log',
+      handler(req, res) {
+        const url = new URL(req.url || '/', 'http://localhost')
+        const id = String(url.searchParams.get('id') || '')
+        if (!ID_PATTERN.test(id)) return sendJson(res, 400, { error: 'id 不合法' })
+        const job = readJob(id)
+        if (!job) return sendJson(res, 404, { error: `没有任务 ${id}` })
+        const lines = Math.min(MAX_TAIL_LINES, Math.max(1, Math.trunc(Number(url.searchParams.get('tail')) || 200)))
+        sendText(res, 200, tail(join(jobDir(id), 'out.log'), lines) || '（暂无输出）')
+      },
+    }))
+  }
 
   register({
     name: 'outlive_run',
@@ -454,15 +642,17 @@ export function apply(ctx, config = {}) {
   register({
     name: 'outlive_agent',
     description:
-      '把一整件任务交给一个离场编码 agent（默认 opencode）去做：它在本机独立进程里跑，不占当前会话的上下文，'
+      '把一整件任务交给一个离场编码 agent 去做：它在本机独立进程里跑，不占当前会话的上下文，'
       + '也不受 harness 重启影响。返回任务 id，完成时结果送回会话。\n\n'
+      + '引擎默认自动挑：探测本机装了哪些编码 agent（opencode / codex / claude），按这个顺序选第一个可用的；'
+      + '也可以用 engine 点名。想知道探测结果就调 outlive_engines。\n\n'
       + '和内置 subagent 的区别：内置 subagent 活在 dsh web 里，dsh 一重启就一起没了，而且整个过程占着当前回合；'
       + 'outlive_agent 是“交出去就不管了”，你可以继续做别的，它跑完来敲你。'
       + '适合自成一体、耗时、能独立验收的活（写一个脚本并测通、跑一次迁移、某个仓库的调研）。'
       + '不适合需要你中途盯着、频繁来回确认的活。',
     parameters: {
       task: { type: 'string', required: true, description: '完整任务描述。对方看不到这段对话，必须自带上下文、路径和验收标准。' },
-      engine: { type: 'string', description: '执行器，默认 opencode；可在插件 config.engines 里注册别的。' },
+      engine: { type: 'string', description: '执行器；不给就自动挑（opencode → codex → claude 里第一个装着的）。' },
       label: { type: 'string', description: '一句话标题，出现在列表里。' },
       cwd: { type: 'string', description: '在哪个目录里干，默认 $HOME。' },
       runtime_max_sec: { type: 'integer', description: `最长运行秒数，默认 ${DEFAULT_RUNTIME_MAX_SEC}。` },
@@ -471,17 +661,16 @@ export function apply(ctx, config = {}) {
     async execute(args, exec) {
       const task = String(args.task ?? '').trim()
       if (!task) return textResult('ERROR: task 不能为空')
-      const engine = String(args.engine || 'opencode')
+      const resolved = resolveEngine(args.engine, config)
+      if (resolved.error) return textResult(`ERROR: ${resolved.error}`)
+      const engine = resolved.engine.name
       const title = args.label || task.split('\n')[0].slice(0, 60)
       const id = randomUUID().replaceAll('-', '').slice(0, 12)
       const dir = jobDir(id)
       mkdirSync(dir, { recursive: true })
       const taskFile = join(dir, 'task.txt')
       writeFileSync(taskFile, task)
-      const command = agentCommand(engine, taskFile, title, config)
-      if (!command) {
-        return textResult(`ERROR: 未知执行器 "${engine}"。可用：${['opencode', ...Object.keys(config?.engines || {})].join(', ')}`)
-      }
+      const command = resolved.build(taskFile, title)
       const { job, error } = await dispatch({
         kind: 'agent',
         id,
@@ -498,10 +687,33 @@ export function apply(ctx, config = {}) {
         patchJob(job.id, { sessionId, engine })
       }
       return textResult([
-        `已交给 ${engine}：${job.id}`,
+        `已交给 ${resolved.engine.label}（${engine}${resolved.engine.version ? ' · ' + resolved.engine.version : ''}）：${job.id}`,
         `任务文件：${taskFile}`,
         `日志：${job.logPath}`,
         '它在本机独立 cgroup 里跑，不受 dsh 重启影响；跑完会把结果送回这个会话。',
+      ].join('\n'))
+    },
+  })
+
+  register({
+    name: 'outlive_engines',
+    description:
+      '看本机现在有哪些编码 agent 可以被 outlive_agent 派活：探测 opencode / codex / claude 装在哪、什么版本，'
+      + '以及 engine 留空时会选哪个。装完新 agent 之后调一次（探测有 30 秒缓存，这里会强制刷新）。',
+    parameters: {},
+    output,
+    async execute() {
+      const available = detectedEngines(config, { refresh: true })
+      if (available.length === 0) {
+        return textResult(`没检测到可用的编码 agent。找过 ${PREFERRED_ENGINES.join(' / ')}，命令行都不在 PATH 里。`)
+      }
+      const fallback = resolvedDefault(config)
+      const custom = Object.keys(config?.engines || {})
+      return textResult([
+        `engine 留空时用：${fallback ? `${fallback.label}（${fallback.name}）` : config?.defaultEngine || '（无）'}`,
+        '',
+        ...available.map((engine) => `- ${engine.name.padEnd(9)}${engine.label.padEnd(12)}${engine.bin}${engine.version ? `  ${engine.version}` : ''}`),
+        ...(custom.length ? ['', `自定义执行器（config.engines）：${custom.join(', ')}`] : []),
       ].join('\n'))
     },
   })

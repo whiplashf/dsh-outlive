@@ -2,6 +2,6 @@
   "meta": {
     "title": "离场执行",
     "description": "把命令或整件任务交给 harness 之外的 systemd unit 去跑，重启不中断，结束时把结果送回会话。",
-    "detail": "内置的后台任务（包括 bash 的 run_in_background）都是 dsh web 的子进程，进程一重启就一起没了。这个插件自己不执行任何东西：它写一个脚本、交给独立的 systemd 瞬态 unit，然后只读磁盘上的日志和退出码。于是重启 dsh 只丢一个轮询循环，活还在跑，账还在记。"
+    "detail": "内置的后台任务（包括 bash 的 run_in_background）都是 dsh web 的子进程，进程一重启就一起没了。这个插件自己不执行任何东西：它写一个脚本、交给独立的 systemd 瞬态 unit，然后只读磁盘上的日志和退出码。于是重启 dsh 只丢一个轮询循环，活还在跑，账还在记。\n\n给出五个工具：outlive_run 跑一条命令，outlive_agent 把整件任务派给离场编码 agent，outlive_engines 看本机装了哪些 agent（opencode / codex / claude，自动探测），outlive_status / outlive_list 看账，outlive_cancel 中止。侧栏还有一块「离场任务」面板，实时列出所有任务、进度和日志尾部。"
   }
 }
