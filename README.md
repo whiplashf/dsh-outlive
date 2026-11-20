@@ -39,10 +39,12 @@ dsh web 重启 ──► 子进程全部消失 ──► 没有日志、没有�
 
 侧栏「离场任务」→ 一块面板，四段：
 
-- **执行器**：本机探到的 agent CLI（默认那个高亮），「检测」按钮强制重探
-- **常用任务**：命名保存过的命令，一点「运行」就投递，「删除」只删条目不动历史
-- **新建任务**：写命令 + 起名，「保存并运行」或「只保存」
-- **任务列表**：运行中 / 完成 / 失败 / 已中止、耗时、展开看日志尾部，3 秒轮询
+- **可用 agent**：探到的 CLI（名字、**可执行文件路径**、版本），点「重新检测」重扫 PATH；下面能一键添加预设（opencode / codex / claude / gemini / cursor-agent / copilot），没装的不让加；也能手填可执行文件 + 参数模板（`{file}` 任务文件、`{title}` 标题）
+- **新建任务**：写要它做什么（人话），选交给谁，点「交给它」或「只保存」
+- **常用任务**：存过的任务（带 agent 标记），「再跑一次」；换了 agent 会按你当时选的走
+- **任务列表**：运行中 / 完成 / 失败 / 已中止、耗时，展开看日志尾部，3 秒轮询
+
+面板只管「交给 agent」，不跑 shell 命令——那是我要用的能力（`outlive_run` 工具），不是这个页面的活。
 
 面板不自己开端口，用的是宿主 web server 上的同源路由：
 
@@ -50,15 +52,21 @@ dsh web 重启 ──► 子进程全部消失 ──► 没有日志、没有�
 |---|---|---|
 | GET | `/__outlive/jobs` | `{ engines, defaultEngine, stateDir, jobs }` |
 | GET | `/__outlive/log?id=…&tail=…` | 纯文本日志尾部（`id` 必须是 6–16 位小写字母数字，路径穿越直接被 400） |
-| GET | `/__outlive/engines[?refresh=1]` | 重探执行器 |
+| GET | `/__outlive/agents[?refresh=1]` | 可用 agent（含 bin 路径）+ 预设 + 手动添加的 |
+| POST | `/__outlive/agents` | 添加：`{preset}` 或 `{name,bin,args,label?}` |
+| POST | `/__outlive/agents/delete` | 移除手动添加的：`{name}` |
 | GET | `/__outlive/tasks` | 常用任务列表 |
-| POST | `/__outlive/tasks` | 存/改一条（`{command,label?,cwd?}`，按命令内容去重） |
+| POST | `/__outlive/tasks` | 存/改一条（`{command,label?,engine?,kind?}`，按内容+类型去重） |
 | POST | `/__outlive/tasks/delete` | 删一条（`{id}`） |
-| POST | `/__outlive/run` | 投递一条（`{command,label?,cwd?,taskId?}`） |
+| POST | `/__outlive/run` | 投递一条（`{command,engine?,label?,cwd?,taskId?,kind?}`） |
 
 三条 `POST` 都要带 `x-outlive: 1` 头，且只接受 JSON 体（≤64 KiB）：网关已经管了"你是谁"，这个头管的是"这个请求来自面板"——跨站表单设不了自定义头。
 
-常用任务存在 `$OUTLIVE_HOME/tasks.json`（默认 `~/runtime/outlive/tasks.json`），最多 40 条，按命令内容取 id，重复保存只更新不新增。
+手动添加的 agent 存在 `$OUTLIVE_HOME/agents.json`（默认 `~/runtime/outlive/agents.json`），一条形如 `{name,label,bin,args}`；`bin` 在添加时就被解析成绝对路径，之后 `command.sh` 里直接 `exec` 它（不依赖 PATH）。
+
+### 执行器怎么选
+
+`auto`（默认）= 探测顺序里的第一个可用；点名某个 agent 就只给它；点名但没装会明确报错，不会静默换人。
 
 ### 输入框里的 `/`
 

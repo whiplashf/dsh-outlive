@@ -115,7 +115,7 @@ function taskKind(value) {
  * Identity is the command text, so re-saving an edited label keeps one row
  * instead of growing a duplicate with the same meaning.
  */
-function saveTask({ label, command, cwd, kind }) {
+function saveTask({ label, command, cwd, kind, engine }) {
   const text = String(command ?? '').trim()
   if (!text) return undefined
   const tasks = readTasks()
@@ -126,6 +126,7 @@ function saveTask({ label, command, cwd, kind }) {
   const next = {
     id,
     kind: mode,
+    engine: String(engine ?? '').trim() || existing?.engine || '',
     command: text,
     label: String(label ?? '').trim() || existing?.label || text.split('\n')[0].slice(0, 60),
     cwd: String(cwd ?? '').trim() || existing?.cwd || '',
@@ -542,13 +543,86 @@ const BUILTIN_ENGINES = {
   },
 }
 
+// Fixed choices the panel offers as one-click adds. Each is "how do I run this
+// tool non-interactively, once, with a prompt", which is the only thing this
+// plugin needs to know about an agent. `{file}` is the path to the task text,
+// `{title}` a one-line label.
+const AGENT_PRESETS = [
+  {
+    name: 'opencode',
+    label: 'OpenCode',
+    bin: 'opencode',
+    args: 'run --standalone --auto --archived --title {title} -- {file}',
+  },
+  {
+    name: 'codex',
+    label: 'Codex',
+    bin: 'codex',
+    args: 'exec --skip-git-repo-check -s workspace-write -- {file}',
+  },
+  {
+    name: 'claude',
+    label: 'Claude Code',
+    bin: 'claude',
+    args: '-p --dangerously-skip-permissions {file}',
+  },
+  {
+    name: 'gemini',
+    label: 'Gemini CLI',
+    bin: 'gemini',
+    args: '-p {file} --yolo',
+  },
+  {
+    name: 'cursor-agent',
+    label: 'Cursor Agent',
+    bin: 'cursor-agent',
+    args: '-p --force {file}',
+  },
+  {
+    name: 'copilot',
+    label: 'GitHub Copilot CLI',
+    bin: 'copilot',
+    args: '-p {file} --allow-all-tools',
+  },
+]
+
 const PREFERRED_ENGINES = ['opencode', 'codex', 'claude']
 const ENGINE_CACHE_MS = 30_000
 
+// Agents the user added by hand: same shape as a preset, stored beside the jobs
+// so they survive restarts and appear in every session.
+const AGENTS_PATH = join(STATE_DIR, 'agents.json')
+
+function readAgents() {
+  const value = readJson(AGENTS_PATH, undefined)
+  const list = Array.isArray(value && value.agents) ? value.agents : []
+  return list.filter((agent) => agent
+    && typeof agent.name === 'string'
+    && agent.name.trim() !== ''
+    && typeof agent.bin === 'string'
+    && agent.bin.trim() !== '')
+}
+
+function writeAgents(agents) {
+  writeFileSync(AGENTS_PATH, `${JSON.stringify({ agents }, null, 2)}\n`)
+  engineCache = undefined
+}
+
+/** Expand a stored args template into the shell snippet that runs one task. */
+function agentCommand(bin, args, file, title) {
+  const body = String(args || '{file}')
+    .replaceAll('{title}', shellQuote(title))
+    .replaceAll('{file}', `"$(cat ${shellQuote(file)})"`)
+  return `exec ${shellQuote(bin)} ${body}`
+}
+
 function findBinary(bin) {
+  const text = String(bin ?? '')
+  if (!text) return undefined
+  if (text.includes('/')) return existsSync(text) ? text : undefined
   for (const dir of DEFAULT_PATH.split(':')) {
     if (!dir) continue
-    const candidate = join(dir, bin)
+    const candidate = join(dir, text)
     if (existsSync(candidate)) return candidate
   }
   return undefined
@@ -572,25 +646,44 @@ let engineCache
  */
 function detectedEngines(config, { refresh = false } = {}) {
   if (!refresh && engineCache && Date.now() - engineCache.at < ENGINE_CACHE_MS) return engineCache.list
-  const custom = config?.engines && typeof config.engines === 'object' ? config.engines : {}
-  const names = [...new Set([...PREFERRED_ENGINES, ...Object.keys(custom)])]
   const list = []
-  for (const name of names) {
-    const builtin = BUILTIN_ENGINES[name]
-    const build = typeof custom[name] === 'function' ? custom[name] : builtin?.build
-    if (typeof build !== 'function') continue
-    const bin = builtin?.bin || name
-    const path = findBinary(bin)
-    if (!path) continue
+  const seen = new Set()
+  const push = (entry) => {
+    if (seen.has(entry.name)) return
+    const path = findBinary(entry.bin)
+    if (!path) return
+    seen.add(entry.name)
     list.push({
-      name,
-      label: builtin?.label || name,
+      name: entry.name,
+      label: entry.label || entry.name,
       bin: path,
-      version: builtin ? binaryVersion(path, builtin.versionArgs) : '',
+      version: binaryVersion(path, entry.versionArgs || ['--version']),
+      custom: entry.custom === true,
     })
+  }
+  // built-ins first, then hand-added ones, then anything a config function added
+  for (const name of PREFERRED_ENGINES) {
+    if (BUILTIN_ENGINES[name]) push({ ...BUILTIN_ENGINES[name], name })
+  }
+  for (const name of Object.keys(BUILTIN_ENGINES)) {
+    if (!PREFERRED_ENGINES.includes(name)) push({ ...BUILTIN_ENGINES[name], name })
+  }
+  for (const agent of readAgents()) push({ ...agent, custom: true })
+  const extra = config?.engines && typeof config.engines === 'object' ? config.engines : {}
+  for (const [name, build] of Object.entries(extra)) {
+    if (typeof build === 'function') push({ name, label: name, bin: name, custom: false })
   }
   engineCache = { at: Date.now(), list }
   return list
+}
+
+/** How to run one engine by name — built-in preset, hand-added agent, or config fn. */
+function engineBuild(name) {
+  const builtin = BUILTIN_ENGINES[name]
+  if (builtin) return builtin.build
+  const saved = readAgents().find((agent) => agent.name === name)
+  if (saved) return (file, title) => agentCommand(saved.bin, saved.args, file, title)
+  return undefined
 }
 
 /** Resolve `engine` to the snippet that runs it, or say why it cannot. */
@@ -601,13 +694,18 @@ function resolveEngine(requested, config) {
     ? available.find((engine) => engine.name === config?.defaultEngine) ?? available[0]
     : available.find((engine) => engine.name === asked)
   if (!pick) {
-    const known = [...new Set([...PREFERRED_ENGINES, ...Object.keys(config?.engines || {})])]
+    const known = [...new Set([
+      ...PREFERRED_ENGINES,
+      ...readAgents().map((agent) => agent.name),
+      ...Object.keys(config?.engines || {}),
+    ])]
     return asked === 'auto'
       ? { error: `本机没检测到可用的编码 agent（找过 ${known.join(' / ')}）。` }
       : { error: `执行器 "${asked}" 不可用。本机可用：${available.map((e) => e.name).join(', ') || '（无）'}` }
   }
-  const custom = config?.engines?.[pick.name]
-  const build = typeof custom === 'function' ? custom : BUILTIN_ENGINES[pick.name].build
+  const build = engineBuild(pick.name)
+    ?? (typeof config?.engines?.[pick.name] === 'function' ? config.engines[pick.name] : undefined)
+  if (typeof build !== 'function') return { error: `执行器 "${pick.name}" 没有可用的启动命令。` }
   return { engine: pick, build }
 }
 
@@ -708,6 +806,7 @@ async function startAgentTask({ task, engine: requested, label, cwd, runtimeMaxS
     runtimeMaxSec,
   })
   if (error) return { error: `投递失败（${error}）\n目录：${dir}`, job }
+  patchJob(job.id, { engine: resolved.engine.name })
   if (agent) {
     const sessionId = sessionKey(agent)
     if (sessionId) {
@@ -767,6 +866,67 @@ async function startAgentTask({ task, engine: requested, label, cwd, runtimeMaxS
         })
       },
     }))
+    // Which agents exist, which ones this machine can actually run, and where
+    // they live. The panel shows the paths on purpose: "why did it pick codex"
+    // is answerable only if you can see that codex is a different binary.
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: '/__outlive/agents',
+      async handler(req, res) {
+        const method = (req.method || 'GET').toUpperCase()
+        if (method === 'GET') {
+          const url = new URL(req.url || '/', 'http://localhost')
+          const refresh = url.searchParams.get('refresh') === '1'
+          const detected = detectedEngines(config, { refresh })
+          return sendJson(res, 200, {
+            detected,
+            defaultEngine: resolvedDefault(config),
+            presets: AGENT_PRESETS.map((preset) => ({
+              name: preset.name,
+              label: preset.label,
+              bin: preset.bin,
+              args: preset.args,
+              path: findBinary(preset.bin) || null,
+              installed: Boolean(findBinary(preset.bin)),
+              added: readAgents().some((agent) => agent.name === preset.name),
+            })),
+            custom: readAgents(),
+          })
+        }
+        const body = await readPanelJson(req, res)
+        if (body === undefined) return undefined
+
+        // Adding is either "one of the presets" or an explicit bin + args.
+        const presetName = String(body.preset ?? '').trim()
+        const preset = presetName ? AGENT_PRESETS.find((entry) => entry.name === presetName) : undefined
+        const name = String(body.name ?? preset?.name ?? '').trim()
+        const bin = String(body.bin ?? preset?.bin ?? '').trim()
+        const args = String(body.args ?? preset?.args ?? '{file}').trim() || '{file}'
+        if (!name || !bin) return sendJson(res, 400, { error: 'name 和 bin 都要有' })
+        if (!/^[a-zA-Z0-9._-]{1,40}$/.test(name)) return sendJson(res, 400, { error: 'name 只能用字母数字和 ._-' })
+        const resolvedBin = findBinary(bin)
+        if (!resolvedBin) return sendJson(res, 400, { error: `找不到可执行文件：${bin}` })
+
+        const agents = readAgents().filter((agent) => agent.name !== name)
+        agents.push({ name, label: String(body.label ?? preset?.label ?? name).trim(), bin: resolvedBin, args })
+        writeAgents(agents)
+        return sendJson(res, 200, { agents, detected: detectedEngines(config, { refresh: true }) })
+      },
+    }))
+    web.effect(() => web.webServer.register({
+      kind: 'exact',
+      path: '/__outlive/agents/delete',
+      async handler(req, res) {
+        const body = await readPanelJson(req, res)
+        if (body === undefined) return undefined
+        const name = String(body.name ?? '').trim()
+        const agents = readAgents()
+        const kept = agents.filter((agent) => agent.name !== name)
+        if (kept.length === agents.length) return sendJson(res, 404, { error: '没有这个 agent' })
+        writeAgents(kept)
+        return sendJson(res, 200, { agents: kept, detected: detectedEngines(config, { refresh: true }) })
+      },
+    }))
     web.effect(() => web.webServer.register({
       kind: 'exact',
       path: '/__outlive/tasks',
@@ -776,7 +936,13 @@ async function startAgentTask({ task, engine: requested, label, cwd, runtimeMaxS
         }
         const body = await readPanelJson(req, res)
         if (body === undefined) return undefined
-        const task = saveTask({ label: body.label, command: body.command, cwd: body.cwd, kind: body.kind })
+        const task = saveTask({
+          label: body.label,
+          command: body.command,
+          cwd: body.cwd,
+          kind: body.kind,
+          engine: body.engine,
+        })
         if (!task) return sendJson(res, 400, { error: 'command 不能为空' })
         return sendJson(res, 200, { task, tasks: readTasks() })
       },

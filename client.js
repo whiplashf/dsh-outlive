@@ -75,6 +75,20 @@ window.__ModuleLoader__.load({
         background: 'color-mix(in oklab, currentColor 4%, transparent)',
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       },
+      kitRow: {
+        display: 'grid', gridTemplateColumns: 'auto 1fr auto auto', alignItems: 'center', gap: 10,
+        padding: '7px 12px', fontSize: 12.5,
+        borderTop: '1px solid color-mix(in oklab, currentColor 10%, transparent)',
+      },
+      kitPath: {
+        fontSize: 11.5, opacity: 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      },
+      select: {
+        padding: '5px 8px', borderRadius: 8, color: 'inherit', fontSize: 12.5,
+        border: '1px solid color-mix(in oklab, currentColor 16%, transparent)',
+        background: 'color-mix(in oklab, currentColor 4%, transparent)',
+      },
       input: {
         flex: 1, minWidth: 0, padding: '6px 10px', borderRadius: 8, color: 'inherit', fontSize: 12.5,
         border: '1px solid color-mix(in oklab, currentColor 16%, transparent)',
@@ -207,29 +221,33 @@ window.__ModuleLoader__.load({
 
     function OutlivePage() {
       const [data, setData] = useState({ engines: [], jobs: [] })
+      const [agents, setAgents] = useState({ detected: [], presets: [], custom: [] })
       const [tasks, setTasks] = useState([])
       const [error, setError] = useState('')
       const [notice, setNotice] = useState('')
       const [filter, setFilter] = useState('all')
       const [openId, setOpenId] = useState(null)
       const [detecting, setDetecting] = useState(false)
-      const [command, setCommand] = useState('')
+      const [task, setTask] = useState('')
       const [label, setLabel] = useState('')
+      const [target, setTarget] = useState('')
       const [posting, setPosting] = useState(false)
-      // 'run' = a shell command; 'agent' = a task description for a coding agent.
-      const [mode, setMode] = useState('run')
+      const [bin, setBin] = useState('')
+      const [args, setArgs] = useState('{file}')
       const busy = useRef(false)
 
       const load = useCallback(async () => {
         if (busy.current) return
         busy.current = true
         try {
-          const [jobs, saved] = await Promise.all([
+          const [jobs, saved, who] = await Promise.all([
             readJson('/__outlive/jobs'),
             readJson('/__outlive/tasks').catch(() => ({ tasks: [] })),
+            readJson('/__outlive/agents').catch(() => ({ detected: [], presets: [], custom: [] })),
           ])
           setData(jobs)
           setTasks(saved.tasks || [])
+          if (Array.isArray(who.detected)) setAgents(who)
           setError('')
         } catch (err) {
           setError(`读不到任务列表：${err && err.message ? err.message : err}`)
@@ -249,13 +267,17 @@ window.__ModuleLoader__.load({
         return () => { alive = false; clearTimeout(timer) }
       }, [load])
 
+      const detected = agents.detected || []
+      const chosen = target || (data.defaultEngine && data.defaultEngine.name)
+        || (detected[0] && detected[0].name) || ''
+
       const detect = useCallback(async () => {
         setDetecting(true)
         setNotice('')
         try {
-          const next = await readJson('/__outlive/engines?refresh=1')
-          setData((prev) => ({ ...prev, engines: next.engines, defaultEngine: next.defaultEngine }))
-          setNotice(`探到 ${(next.engines || []).length} 个执行器`)
+          const next = await readJson('/__outlive/agents?refresh=1')
+          setAgents(next)
+          setNotice(`探到 ${(next.detected || []).length} 个 agent`)
         } catch (err) {
           setNotice(`检测失败：${err && err.message ? err.message : err}`)
         } finally {
@@ -263,26 +285,65 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      const runTask = useCallback(async (task) => {
+      // One click for a known CLI; the path check happens on the server, so a
+      // preset that is not installed says so instead of silently doing nothing.
+      const addPreset = useCallback(async (preset) => {
+        setNotice('')
+        try {
+          const next = await postJson('/__outlive/agents', { preset: preset.name })
+          setAgents(next)
+          setNotice(`已添加 ${preset.label}`)
+        } catch (err) {
+          setNotice(`添加失败：${err && err.message ? err.message : err}`)
+        }
+      }, [])
+
+      const addCustom = useCallback(async () => {
+        const path = bin.trim()
+        if (!path) return
+        const name = path.split('/').filter(Boolean).pop().replace(/[^a-zA-Z0-9._-]/g, '') || 'agent'
+        setNotice('')
+        try {
+          const next = await postJson('/__outlive/agents', { name, bin: path, args: args.trim() || '{file}' })
+          setAgents(next)
+          setBin('')
+          setNotice(`已添加 ${name}`)
+        } catch (err) {
+          setNotice(`添加失败：${err && err.message ? err.message : err}`)
+        }
+      }, [bin, args])
+
+      const removeAgent = useCallback(async (agent) => {
+        try {
+          const next = await postJson('/__outlive/agents/delete', { name: agent.name })
+          setAgents(next)
+          setNotice(`已移除 ${agent.name}`)
+        } catch (err) {
+          setNotice(`移除失败：${err && err.message ? err.message : err}`)
+        }
+      }, [])
+
+      const runTask = useCallback(async (saved) => {
         setNotice('')
         try {
           const started = await postJson('/__outlive/run', {
-            kind: task.kind || 'run',
-            command: task.command,
-            label: task.label,
-            cwd: task.cwd || undefined,
-            taskId: task.id,
+            kind: saved.kind || 'agent',
+            command: saved.command,
+            label: saved.label,
+            engine: saved.engine || chosen,
+            cwd: saved.cwd || undefined,
+            taskId: saved.id,
           })
           setNotice(`已投递 ${started.id}`)
           await load()
         } catch (err) {
           setNotice(`投递失败：${err && err.message ? err.message : err}`)
         }
-      }, [load])
+      }, [chosen, load])
 
-      const forgetTask = useCallback(async (task) => {
+      const forgetTask = useCallback(async (saved) => {
         try {
-          const next = await postJson('/__outlive/tasks/delete', { id: task.id })
+          const next = await postJson('/__outlive/tasks/delete', { id: saved.id })
           setTasks(next.tasks || [])
         } catch (err) {
           setNotice(`删除失败：${err && err.message ? err.message : err}`)
@@ -290,23 +351,29 @@ window.__ModuleLoader__.load({
       }, [])
 
       const submit = useCallback(async (alsoRun) => {
-        const text = command.trim()
+        const text = task.trim()
         if (!text) return
         setPosting(true)
         setNotice('')
         try {
-          const saved = await postJson('/__outlive/tasks', { kind: mode, command: text, label: label.trim() })
+          const saved = await postJson('/__outlive/tasks', {
+            kind: 'agent',
+            engine: chosen,
+            command: text,
+            label: label.trim(),
+          })
           setTasks(saved.tasks || [])
-          setCommand('')
+          setTask('')
           setLabel('')
           if (alsoRun) {
             const started = await postJson('/__outlive/run', {
-              kind: mode,
+              kind: 'agent',
+              engine: chosen,
               command: text,
               label: saved.task ? saved.task.label : undefined,
               taskId: saved.task ? saved.task.id : undefined,
             })
-            setNotice(`已投递 ${started.id}`)
+            setNotice(`已交给 ${chosen || '自动挑的 agent'}：${started.id}`)
           } else {
             setNotice('已存为常用任务')
           }
@@ -316,7 +383,7 @@ window.__ModuleLoader__.load({
         } finally {
           setPosting(false)
         }
-      }, [command, label, mode, load])
+      }, [task, label, chosen, load])
 
       const jobs = data.jobs || []
       const running = useMemo(() => jobs.filter((job) => job.status === 'running').length, [jobs])
@@ -333,7 +400,7 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.title }, '离场任务'),
           h('div', { style: styles.meta },
             `${jobs.length} 条 · 运行中 ${running}`,
-            data.engines && data.engines.length ? ` · 默认 ${describeDefault(data.engines, data.defaultEngine)}` : ''),
+            data.stateDir ? ` · ${data.stateDir}` : ''),
           h('div', { style: styles.spacer }),
           h('div', { style: styles.row },
             ...[['all', '全部'], ['running', '运行中'], ['settled', '已完成']].map(([key, text]) =>
@@ -342,78 +409,83 @@ window.__ModuleLoader__.load({
                 style: { ...styles.btn, ...(filter === key ? styles.btnOn : {}) },
                 onClick: () => setFilter(key),
               }, text)),
-            h('button', { style: styles.btn, onClick: () => void load(), title: '立刻刷新' }, '刷新')),
-        ),
+            h('button', { style: styles.btn, onClick: () => void load(), title: '立刻刷新' }, '刷新'))),
+        h('div', { style: styles.row }, h('div', { style: styles.spacer })),
 
-        // engines: what this machine can actually hand work to, rechecked on demand
+        // agents: what this machine can hand work to, where it lives, and how to
+        // add one it does not know about yet
         h('div', { style: styles.section },
           h('div', { style: styles.sectionHead },
-            h('span', { style: styles.sectionTitle }, '执行器'),
-            h('span', { style: styles.meta }, describeEngines(data.engines, '')),
+            h('span', { style: styles.sectionTitle }, '可用 agent'),
+            h('span', { style: styles.meta }, detected.length ? `${detected.length} 个` : '一个也没探到'),
             h('div', { style: styles.spacer }),
             h('button', {
               style: { ...styles.btn, ...(detecting ? styles.btnOn : {}) },
               onClick: () => void detect(),
-              title: '重新探测本机装了哪些 agent CLI',
-            }, detecting ? '检测中…' : '检测')),
-          (data.engines || []).length === 0
-            ? h('div', { style: styles.hint }, '没有探到 opencode / codex / claude。')
-            : h('div', { style: styles.chips },
-              (data.engines || []).map((engine) => h('span', {
-                key: engine.name,
-                style: {
-                  ...styles.chip,
-                  ...(data.defaultEngine && data.defaultEngine.name === engine.name ? styles.chipOn : {}),
-                },
-                title: engine.bin || '',
-              }, `${engine.label || engine.name} ${engine.version || ''}`.trim())))),
-
-        // saved tasks: the things worth running again
-        h('div', { style: styles.section },
-          h('div', { style: styles.sectionHead },
-            h('span', { style: styles.sectionTitle }, '常用任务'),
-            h('span', { style: styles.meta }, tasks.length ? `${tasks.length} 条` : '空'),
-            h('div', { style: styles.spacer })),
-          tasks.length === 0
-            ? h('div', { style: styles.hint }, '还没有存过任务。在下面写一条命令，点「保存并运行」。')
+              title: '重新扫一遍 PATH，看看装了哪些 agent CLI',
+            }, detecting ? '检测中…' : '重新检测')),
+          detected.length === 0
+            ? h('div', { style: styles.hint }, 'PATH 里没有找到已知的 agent CLI。下面可以手动添加一个。')
             : h('div', { style: styles.list },
-              tasks.map((task, index) => h('div', {
-                key: task.id,
-                style: { ...styles.taskItem, ...(index === 0 ? styles.itemFirst : {}) },
+              detected.map((agent, index) => h('div', {
+                key: agent.name,
+                style: { ...styles.kitRow, ...(index === 0 ? styles.itemFirst : {}) },
               },
-              h('div', { style: styles.taskMain },
-                h('div', { style: styles.label },
-                  task.kind === 'agent' ? h('span', { style: styles.chip }, 'agent') : null,
-                  task.label),
-                h('div', { style: { ...styles.badge, ...styles.code, opacity: 0.6 } }, task.command.length > 90 ? `${task.command.slice(0, 90)}…` : task.command)),
-              h('div', { style: styles.row },
-                h('button', { style: styles.btn, onClick: () => void runTask(task) }, '运行'),
-                h('button', { style: styles.btnGhost, onClick: () => void forgetTask(task) }, '删除')))))),
+              h('span', { style: { ...styles.chip, ...(chosen === agent.name ? styles.chipOn : {}) } }, agent.label),
+              h('span', { style: styles.kitPath, title: agent.bin }, agent.bin),
+              h('span', { style: styles.meta }, agent.version || ''),
+              agent.custom
+                ? h('button', { style: styles.btnGhost, onClick: () => void removeAgent(agent) }, '移除')
+                : h('span', { style: styles.meta }, '内置')))),
+          h('div', { style: styles.hint }, '点下面的名字添加其他 CLI（没装的不让加）：'),
+          h('div', { style: styles.chips },
+            (agents.presets || []).map((preset) => h('button', {
+              key: preset.name,
+              style: {
+                ...styles.chip,
+                cursor: preset.installed && !preset.added ? 'pointer' : 'default',
+                opacity: preset.installed ? 1 : 0.4,
+                ...(preset.added ? styles.chipOn : {}),
+              },
+              disabled: !preset.installed || preset.added,
+              title: preset.installed ? preset.path : `没找到 ${preset.bin}`,
+              onClick: () => void addPreset(preset),
+            }, preset.added ? `${preset.label} ✓` : preset.label))),
+          h('div', { style: styles.row },
+            h('input', {
+              style: styles.input,
+              placeholder: '自定义 agent 的可执行文件（绝对路径或 PATH 里的名字）',
+              value: bin,
+              onChange: (event) => setBin(event.currentTarget.value),
+            }),
+            h('button', {
+              style: { ...styles.btn, ...styles.btnPrimary },
+              disabled: bin.trim() === '',
+              onClick: () => void addCustom(),
+            }, '添加')),
+          h('input', {
+            style: styles.input,
+            placeholder: '它的启动参数模板（{file} = 任务文件，{title} = 标题）',
+            value: args,
+            onChange: (event) => setArgs(event.currentTarget.value),
+          })),
 
-        // create: one shell command, or one task description for an agent —
-        // same box, because from here the difference is just who does the work
+        // create: what to do, and who does it
         h('div', { style: styles.section },
           h('div', { style: styles.sectionHead },
-            h('span', { style: styles.sectionTitle }, '新建'),
-            h('div', { style: styles.row },
-              h('button', {
-                style: { ...styles.btn, ...(mode === 'run' ? styles.btnOn : {}) },
-                onClick: () => setMode('run'),
-                title: '在会话之外的 systemd unit 里跑一条 shell 命令',
-              }, '命令'),
-              h('button', {
-                style: { ...styles.btn, ...(mode === 'agent' ? styles.btnOn : {}) },
-                onClick: () => setMode('agent'),
-                title: '把一整件任务交给本机的编码 agent（opencode / codex / claude）',
-              }, '交给 agent'))),
+            h('span', { style: styles.sectionTitle }, '新建任务'),
+            h('div', { style: styles.spacer }),
+            h('select', {
+              style: styles.select,
+              value: chosen,
+              onChange: (event) => setTarget(event.currentTarget.value),
+            }, detected.map((agent) => h('option', { key: agent.name, value: agent.name }, agent.label)))),
           h('textarea', {
             style: styles.textarea,
-            rows: 3,
-            placeholder: mode === 'agent'
-              ? '要做的事，用人话写清背景、路径和验收标准（对方看不到这段对话）'
-              : '要跑的命令（bash 语义，在会话之外的 systemd unit 里执行）',
-            value: command,
-            onChange: (event) => setCommand(event.currentTarget.value),
+            rows: 4,
+            placeholder: '让 agent 做什么，用人话写清背景、路径和验收标准（它看不到这段对话）',
+            value: task,
+            onChange: (event) => setTask(event.currentTarget.value),
           }),
           h('div', { style: styles.row },
             h('input', {
@@ -424,14 +496,35 @@ window.__ModuleLoader__.load({
             }),
             h('button', {
               style: { ...styles.btn, ...styles.btnPrimary },
-              disabled: posting || command.trim() === '',
+              disabled: posting || task.trim() === '' || chosen === '',
               onClick: () => void submit(true),
-            }, posting ? '投递中…' : '保存并运行'),
+            }, posting ? '投递中…' : '交给它'),
             h('button', {
               style: styles.btn,
-              disabled: posting || command.trim() === '',
+              disabled: posting || task.trim() === '',
               onClick: () => void submit(false),
             }, '只保存'))),
+
+        // saved: the tasks worth doing again
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead },
+            h('span', { style: styles.sectionTitle }, '常用任务'),
+            h('span', { style: styles.meta }, tasks.length ? `${tasks.length} 条` : '空')),
+          tasks.length === 0
+            ? h('div', { style: styles.hint }, '还没有存过任务。在上面写一件，点「只保存」。')
+            : h('div', { style: styles.list },
+              tasks.map((saved, index) => h('div', {
+                key: saved.id,
+                style: { ...styles.taskItem, ...(index === 0 ? styles.itemFirst : {}) },
+              },
+              h('div', { style: styles.taskMain },
+                h('div', { style: styles.label },
+                  saved.engine ? h('span', { style: styles.chip }, saved.engine) : null,
+                  saved.label),
+                h('div', { style: { ...styles.badge, ...styles.code, opacity: 0.6 } }, saved.command.length > 90 ? `${saved.command.slice(0, 90)}…` : saved.command)),
+              h('div', { style: styles.row },
+                h('button', { style: styles.btn, onClick: () => void runTask(saved) }, '再跑一次'),
+                h('button', { style: styles.btnGhost, onClick: () => void forgetTask(saved) }, '删除')))))),
 
         notice ? h('div', { style: styles.hint }, notice) : null,
         error ? h('div', { style: styles.hint }, error) : null,
@@ -460,10 +553,6 @@ window.__ModuleLoader__.load({
               h('span', null, open.cwd || ''),
               h('span', null, open.finishedAt ? `结束于 ${ago(open.finishedAt)}` : '还在跑')),
             open.error ? h('div', { style: styles.hint }, open.error) : null,
-            open.exitCode === 127
-              ? h('div', { style: styles.hint },
-                '127 是「命令不存在」：这条更像一句人话而不是命令——用「交给 agent」模式，让它自己去想怎么做。')
-              : null,
             h(LogView, { id: open.id, running: open.status === 'running' }))
           : null,
         h('div', { style: styles.hint },
@@ -473,8 +562,7 @@ window.__ModuleLoader__.load({
           h('span', { style: styles.code }, '/'),
           ' 也能选到常用任务。',
           h('br'),
-          h('span', { style: styles.meta }, `输入框触发源：${triggerState}`)),
-      )
+          h('span', { style: styles.meta }, `输入框触发源：${triggerState}`)))
     }
 
     function OutliveIcon({ size = 18, active = false }) {
@@ -514,11 +602,6 @@ window.__ModuleLoader__.load({
         // find them with an English keyboard.
         const FIXED = [
           {
-            name: 'outlive run',
-            description: '投递一条 shell 命令：在会话之外的 systemd unit 里跑',
-            role: 'run',
-          },
-          {
             name: 'outlive agent',
             description: '把一整件任务交给本机的编码 agent（opencode / codex / claude）',
             role: 'agent',
@@ -551,9 +634,6 @@ window.__ModuleLoader__.load({
             const role = candidate && candidate.role
             if (role === 'agent' && !candidate.saved) {
               return { text: '用 outlive 把这件事交给离场的编码 agent 去做（在会话之外，跑完会把结果送回这个会话）：\n' }
-            }
-            if (role === 'run' && !candidate.saved) {
-              return { text: '用 outlive 投递这条命令（在会话之外的 systemd unit 里执行）：\n' }
             }
             const value = (candidate && candidate.value) || ''
             return {
