@@ -1530,7 +1530,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
-      ctx.locale.register(NS, { en: EN, zh: ZH })
+      ctx.effect(() => ctx.locale.register(NS, { en: EN, zh: ZH }), 'outlive: dictionaries')
       const t = ctx.locale.bind(NS)
 
       let state = null
@@ -1796,13 +1796,13 @@ window.__ModuleLoader__.load({
           },
         }
         const existing = ctx.get?.('inputTriggers')
-        if (existing?.registerSource) existing.registerSource(source)
+        if (existing?.registerSource) ctx.effect(() => existing.registerSource(source), 'outlive: slash source')
         else ctx.inject(['inputTriggers'], (triggers) => triggers.registerSource(source))
       }
 
       input()
     }
 
-    return { inject: ['slots'], apply }
+    return { inject: ['slots', 'locale'], apply }
   },
 })

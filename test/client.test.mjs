@@ -210,6 +210,7 @@ test('client bundle registers the panel, the sidebar entry and the trigger sourc
 
   const locales = []
   const slots = []
+  const effects = []
   const sources = []
   const module = definition.factory((id) => {
     if (id === 'react') return React
@@ -217,7 +218,10 @@ test('client bundle registers the panel, the sidebar entry and the trigger sourc
   })
   const ctx = {
     locale: {
-      register: (ns, dicts) => locales.push({ ns, dicts }),
+      register: (ns, dicts) => {
+        locales.push({ ns, dicts })
+        return () => {}
+      },
       bind: (ns) => (key, vars) => {
         const active = ctx.locale.getSnapshot().active
         const text = (active === 'zh' ? locales[0].dicts.zh : locales[0].dicts.en)[key]
@@ -230,8 +234,20 @@ test('client bundle registers the panel, the sidebar entry and the trigger sourc
       inject: (name, fn) => fn(),
       register: (spec, component) => slots.push({ spec, component }),
     },
-    get: (name) => (name === 'inputTriggers' ? { registerSource: (spec) => sources.push(spec) } : undefined),
+    get: (name) =>
+      name === 'inputTriggers'
+        ? {
+            registerSource: (spec) => {
+              sources.push(spec)
+              return () => {}
+            },
+          }
+        : undefined,
     inject: () => {},
+    effect: (fn) => {
+      const disposer = fn()
+      effects.push(typeof disposer === 'function' ? disposer : () => {})
+    },
   }
   module.apply(ctx)
 
