@@ -563,9 +563,13 @@ export function apply(ctx, config = {}) {
   // The panel lives on the same origin as the page, so it rides the host web
   // server instead of opening a port of its own. No secrets cross this line:
   // job labels, statuses and the tail of a log the model can already read.
-  const webServer = ctx.get('webServer')
-  if (webServer?.register) {
-    ctx.effect(() => webServer.register({
+  //
+  // Routes are registered in a *child* fiber that waits for `webServer`: a
+  // profile without a web server (headless, CLI) must still get the tools, so
+  // this dependency cannot be in `inject`, and a plain `ctx.get()` here would
+  // read `undefined` — bundle plugins mount before the web layers do.
+  ctx.inject(['webServer'], (web) => {
+    web.effect(() => web.webServer.register({
       kind: 'exact',
       path: '/__outlive/jobs',
       handler(_req, res) {
@@ -577,7 +581,7 @@ export function apply(ctx, config = {}) {
         })
       },
     }))
-    ctx.effect(() => webServer.register({
+    web.effect(() => web.webServer.register({
       kind: 'exact',
       path: '/__outlive/log',
       handler(req, res) {
@@ -590,7 +594,7 @@ export function apply(ctx, config = {}) {
         sendText(res, 200, tail(join(jobDir(id), 'out.log'), lines) || '（暂无输出）')
       },
     }))
-  }
+  })
 
   register({
     name: 'outlive_run',

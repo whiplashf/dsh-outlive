@@ -27,9 +27,15 @@ function fakeHost() {
   const ctx = {
     tools: { register: (definition) => { tools.set(definition.name, definition); return () => tools.delete(definition.name) } },
     get: (name) => (name === 'webServer' ? webServer : undefined),
+    // Route registration lives in a child fiber that waits for the service,
+    // exactly like the real harness: run it now, the fake already provides one.
+    inject: (names, callback) => { if (names.every((name) => ctx.get(name))) callback(ctx) },
     on: (event, handler) => { if (event === 'agent/created') created.push(handler); return () => {} },
     effect: (fn) => { const dispose = fn(); return () => dispose?.() },
   }
+  // Cordis exposes an injected service both as `ctx.get(name)` and as the
+  // `ctx.webServer` property; the fake mirrors both.
+  ctx.webServer = webServer
   return { tools, followups, created, routes, ctx }
 }
 
