@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   httpHost,
+  launchArgv,
   planRestart,
   portsFromSs,
   restartPlanText,
@@ -51,6 +52,16 @@ test('portsFromSs picks only the ports owned by the pid', () => {
   assert.deepEqual(portsFromSs(output, 42), [13080])
 })
 
+test('launchArgv resolves a bare program for systemd-run', () => {
+  assert.deepEqual(launchArgv(['/usr/bin/node', 'app.js']), ['/usr/bin/node', 'app.js'])
+  assert.deepEqual(
+    launchArgv(['node', '/usr/local/bin/dsh', 'web'], () => '/usr/local/nodejs/bin/node'),
+    ['/usr/local/nodejs/bin/node', '/usr/local/bin/dsh', 'web'],
+  )
+  assert.deepEqual(launchArgv(['node', 'app.js'], () => null), ['/usr/bin/env', 'node', 'app.js'])
+  assert.deepEqual(launchArgv([]), [])
+})
+
 test('planRestart chooses unit mode only for a persistent unit that owns the pid', () => {
   const argv = ['/usr/local/nodejs/bin/dsh', 'web', '--host', '127.0.0.1', '--port', '13080']
   const io = procIo('0::/user.slice/user-1001.slice/user@1001.service/dsh-web.service\n', argv)
@@ -60,6 +71,7 @@ test('planRestart chooses unit mode only for a persistent unit that owns the pid
   assert.deepEqual(plan.ports, [13080])
   assert.equal(plan.cwd, '/home/dev/workspace')
   assert.equal(plan.argv[0], '/usr/local/nodejs/bin/dsh')
+  assert.deepEqual(plan.launch, plan.argv)
 })
 
 test('planRestart falls back to process mode without a persistent unit', () => {
@@ -69,6 +81,7 @@ test('planRestart falls back to process mode without a persistent unit', () => {
   assert.equal(plan.mode, 'process')
   assert.equal(plan.unit, null)
   assert.deepEqual(plan.ports, [8080, 9000])
+  assert.deepEqual(plan.launch, plan.argv)
 })
 
 test('restartPlanText describes both plans', () => {
