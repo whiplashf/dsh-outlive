@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Outlive",
-    "description": "Hand commands and whole tasks to a systemd unit outside the harness: a restart does not interrupt them, and the result comes back to the session.",
-    "detail": "Every background job the harness starts (including bash run_in_background) is a child of the dsh web process, so restarting it kills the work. This plugin never executes anything itself: it writes a script, hands it to a transient systemd unit in another cgroup, and afterwards only reads the log and exit marker on disk.\n\nFive tools: outlive_run for one command, outlive_agent to hand a whole task to a detached coding agent, outlive_engines to see which agent CLIs this machine has (opencode / codex / claude, auto-detected), outlive_status / outlive_list to read the ledger, outlive_cancel to stop one. A sidebar panel lists every job with its progress and log tail."
+    "description": "Run coding agents, shell commands, or a DSH restart outside the session in transient systemd units; results come back to the session.",
+    "detail": "Background work started inside the harness dies with the dsh process. Outlive writes a script, hands it to a transient systemd unit in a different cgroup, and then only reads the log and exit marker. Restarting dsh loses the poll loop, not the work.\n\nSix tools: outlive_run for one shell command, outlive_agent for a whole task on a coding agent, outlive_agents for agent detection and configuration, outlive_status and outlive_list for the ledger, outlive_cancel to stop a job. The side panel lists running jobs, their logs, saved tasks, and a built-in Restart DSH Web task. On Linux this task restarts the systemd unit that owns dsh when there is one, and otherwise terminates and relaunches the process with the same argv, working directory, and environment."
   }
 }

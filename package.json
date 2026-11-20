@@ -1,25 +1,58 @@
 {
-  "name": "@local/dsh-outlive",
-  "version": "0.4.0",
-  "private": true,
+  "name": "@whiplashf/dsh-outlive",
+  "version": "1.0.0",
+  "description": "Run coding agents and shell commands outside the DSH session, in transient systemd units, and get the result back.",
+  "license": "MIT",
+  "author": "whiplashf",
   "type": "module",
-  "description": "Hand work to a systemd unit outside the harness process: detached commands and detached coding agents that survive a restart",
-  "main": "index.js",
+  "main": "./index.js",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
     "./icon": "./icon.svg",
-    "./locale/*.json": "./locale/*.json"
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json",
+    "./package.json": "./package.json"
   },
   "files": [
     "index.js",
     "client.js",
-    "cordis.patch.yml",
-    "icon.svg",
+    "lib",
     "locale",
-    "docs"
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
   ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "agent",
+    "agents",
+    "systemd",
+    "background-jobs",
+    "detached"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whiplashf/dsh-outlive.git"
+  },
+  "homepage": "https://github.com/whiplashf/dsh-outlive#readme",
+  "bugs": {
+    "url": "https://github.com/whiplashf/dsh-outlive/issues"
+  },
+  "engines": {
+    "dsh": ">=0.2.2-rc.3",
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node --check index.js && node --check client.js && node --check lib/store.js && node --check lib/agents.js && node --check lib/dispatch.js && node --check lib/restart.js && node --check lib/fsbrowse.js && node --check lib/notify.js"
+  },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -27,6 +60,7 @@
       "platform": "web",
       "immediately": true,
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }

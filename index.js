@@ -1,1218 +1,879 @@
 /**
- * outlive — hand work to something that outlives the harness process.
+ * Outlive — run long jobs outside the agent session.
  *
- * Every background job the harness itself starts (including `bash` with
- * `run_in_background`) is a child of the `dsh web` process. Restart that process
- * — which is exactly what you do when you are fixing the process itself — and
- * the job dies mid-step with no record that it ever ran.
- *
- * So this bundle never runs anything itself. It writes a script, hands it to a
- * transient systemd unit in a *different* cgroup, and afterwards only reads
- * files: the job's log, its exit marker, its metadata. Restart the harness and
- * nothing is lost except the in-memory polling loop, which reloads and picks the
- * work back up — including telling the session how it ended.
- *
- * Three layers, deliberately separate:
- *   tools    — what the model can call
- *   dispatch — how a job becomes a systemd unit (the only OS-specific part)
- *   record   — the on-disk job directory, which is the source of truth
+ * The host side owns the ledger, the HTTP panel API, and the model tools. All
+ * execution happens in user-scoped systemd units, so a job survives a closed
+ * browser tab and a restarted DSH.
  */
-
-import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { createHash, randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
+import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createStore, resolveStateDir, BUILTIN_TASKS, RETENTION, TASK_ID, JOB_ID } from './lib/store.js'
+import {
+  createAgents,
+  buildAgentCommand,
+  validateCustomAgent,
+  probeVersion,
+} from './lib/agents.js'
+import {
+  startUnit,
+  probeUnit,
+  stopUnit,
+  writeCommandScript,
+  writeRunScript,
+  unitFor,
+} from './lib/dispatch.js'
+import { planRestart, restartPlanText, writeRestartScript, writeEnvironmentFile } from './lib/restart.js'
+import { browse } from './lib/fsbrowse.js'
+import { noticeText, userMessage, pickLang, readTail } from './lib/notify.js'
 
 export const name = 'outlive'
 export const inject = ['tools', 'agents']
 
-const STATE_DIR = process.env.OUTLIVE_HOME || join(homedir(), 'runtime', 'outlive')
-const UNIT_PREFIX = 'outlive-'
-const DEFAULT_RUNTIME_MAX_SEC = 2 * 60 * 60
-const MAX_TAIL_LINES = 400
-const MAX_RESULT_BYTES = 16 * 1024
-const ID_PATTERN = /^[a-z0-9]{6,16}$/
-const DEFAULT_PATH = process.env.PATH || '/usr/local/bin:/usr/bin:/bin'
+const MAX_BODY = 64 * 1024
+const MAX_RESULT = 16 * 1024
+const MAX_TAIL = 400
+const DEFAULT_RUNTIME = 7200
+const MIN_RUNTIME = 60
+const MAX_RUNTIME = 604800
+const DEFAULT_POLL = 3000
 
-// ---------------------------------------------------------------------------
-// record
-// ---------------------------------------------------------------------------
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
 
-function jobDir(id) {
-  return join(STATE_DIR, id)
+function text(value) {
+  return { text: String(value ?? '').slice(0, MAX_RESULT) }
 }
 
-function readJson(path, fallback) {
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'))
-  } catch {
-    return fallback
-  }
-}
-
-function readJob(id) {
-  if (!ID_PATTERN.test(String(id ?? ''))) return undefined
-  const job = readJson(join(jobDir(id), 'job.json'), undefined)
-  return job && typeof job === 'object' && typeof job.id === 'string' ? job : undefined
-}
-
-function writeJob(job) {
-  writeFileSync(join(jobDir(job.id), 'job.json'), `${JSON.stringify(job, null, 2)}\n`)
-}
-
-/**
- * Write only the fields one reader owns, on top of a fresh read.
- *
- * The record has several independent writers — the launcher, the poll loop
- * settling a finished job, the delivery ledger, a cancel — and they run in
- * different ticks. Rewriting a whole record from a stale read silently undoes
- * another writer's field, which is how `sessionId` used to disappear between
- * dispatch and the first poll.
- */
-function patchJob(id, patch) {
-  const current = readJson(join(jobDir(id), 'job.json'), undefined)
-  if (!current) return undefined
-  const next = { ...current, ...patch }
-  writeJob(next)
-  return next
-}
-
-// ---------------------------------------------------------------------------
-// saved tasks — the panel's "常用任务" list, on disk next to the jobs
-// ---------------------------------------------------------------------------
-
-const TASKS_PATH = join(STATE_DIR, 'tasks.json')
-const MAX_TASKS = 40
-
-/** Read the saved-task list, dropping anything a hand edit left malformed. */
-function readTasks() {
-  const value = readJson(TASKS_PATH, undefined)
-  const list = Array.isArray(value && value.tasks) ? value.tasks : []
-  return list.filter((task) => task
-    && typeof task.id === 'string'
-    && typeof task.command === 'string'
-    && task.command.trim() !== '')
-}
-
-function writeTasks(tasks) {
-  writeFileSync(TASKS_PATH, `${JSON.stringify({ tasks }, null, 2)}\n`)
-}
-
-/** Content-addressed id: saving the same command twice updates one row. */
-function taskKey(command, kind = 'run') {
-  return createHash('sha256').update(`${kind}\u0000${String(command)}`).digest('hex').slice(0, 12)
-}
-
-/** 'run' = a shell command; 'agent' = a task description for a coding agent. */
-function taskKind(value) {
-  return value === 'agent' ? 'agent' : 'run'
-}
-
-/**
- * Save or update one task.
- *
- * Identity is the command text, so re-saving an edited label keeps one row
- * instead of growing a duplicate with the same meaning.
- */
-function saveTask({ label, command, cwd, kind, engine }) {
-  const text = String(command ?? '').trim()
-  if (!text) return undefined
-  const tasks = readTasks()
-  const mode = taskKind(kind)
-  const id = taskKey(text, mode)
-  const now = new Date().toISOString()
-  const existing = tasks.find((task) => task.id === id)
-  const next = {
-    id,
-    kind: mode,
-    engine: String(engine ?? '').trim() || existing?.engine || '',
-    command: text,
-    label: String(label ?? '').trim() || existing?.label || text.split('\n')[0].slice(0, 60),
-    cwd: String(cwd ?? '').trim() || existing?.cwd || '',
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
-    runCount: existing?.runCount ?? 0,
-    lastRunAt: existing?.lastRunAt,
-  }
-  const rest = tasks.filter((task) => task.id !== id)
-  rest.unshift(next)
-  writeTasks(rest.slice(0, MAX_TASKS))
-  return next
-}
-
-function dropTask(id) {
-  const tasks = readTasks()
-  const kept = tasks.filter((task) => task.id !== id)
-  writeTasks(kept)
-  return kept.length !== tasks.length
-}
-
-function bumpTask(id, jobId) {
-  const tasks = readTasks()
-  const task = tasks.find((entry) => entry.id === id)
-  if (!task) return undefined
-  task.runCount = (task.runCount ?? 0) + 1
-  task.lastRunAt = new Date().toISOString()
-  writeTasks(tasks)
-  return jobId
-}
-
-/** Collect one JSON request body, bounded — these routes are small by design. */
-function readBody(req, limit = 64 * 1024) {
-  return new Promise((resolve, reject) => {
-    let size = 0
-    const chunks = []
-    req.on('data', (chunk) => {
-      size += chunk.length
-      if (size > limit) {
-        reject(new Error('请求体过大'))
-        req.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
-  })
-}
-
-/**
- * The panel's write routes require this header.
- *
- * The gate already authenticates the human; this is the second, cheaper lock:
- * a form post from some other origin cannot set a custom header without a
- * preflight the panel never grants.
- */
-function fromPanel(req) {
-  return String(req.headers['x-outlive'] || '') === '1'
-}
-
-async function readPanelJson(req, res) {
-  if (!fromPanel(req)) {
-    sendJson(res, 403, { error: '缺少 x-outlive 头' })
-    return undefined
-  }
-  const raw = await readBody(req)
-  if (raw.trim() === '') return {}
-  try {
-    const value = JSON.parse(raw)
-    return value && typeof value === 'object' ? value : {}
-  } catch {
-    sendJson(res, 400, { error: '请求体不是 JSON' })
-    return undefined
-  }
-}
-
-function tail(path, lines) {
-  let text
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch {
-    return ''
-  }
-  if (text.length > MAX_RESULT_BYTES) text = text.slice(-MAX_RESULT_BYTES)
-  const split = text.split('\n')
-  return split.slice(Math.max(0, split.length - lines)).join('\n').trimEnd()
-}
-
-function listJobs(limit, settleRecords = true) {
-  let entries
-  try {
-    entries = readdirSync(STATE_DIR)
-  } catch {
-    return []
-  }
-  const jobs = []
-  for (const id of entries) {
-    const job = readJob(id)
-    if (job) jobs.push(settleRecords ? settle(job) : job)
-  }
-  jobs.sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))
-  return Number.isFinite(limit) ? jobs.slice(0, limit) : jobs
-}
-
-/**
- * Freeze a running job once its exit marker has content.
- *
- * An empty marker means "the script has not finished", never "failed" — that is
- * why the marker records the exit code and its timestamp together, written last.
- */
-function settle(job) {
-  if (job.status !== 'running') return job
-  let raw
-  try {
-    raw = readFileSync(join(jobDir(job.id), 'exit'), 'utf8').trim()
-  } catch {
-    return job
-  }
-  if (raw === '') return job
-  const [codeText, atText] = raw.split(/\s+/)
-  const code = Number.parseInt(codeText, 10)
-  const at = Number.parseInt(atText, 10)
-  const exitCode = Number.isFinite(code) ? code : null
-  const status = job.killed === true ? 'killed' : (exitCode === 0 ? 'completed' : 'failed')
-  const finishedAt = new Date(Number.isFinite(at) ? at : Date.now()).toISOString()
-  return patchJob(job.id, { exitCode, status, finishedAt })
-}
-
-// ---------------------------------------------------------------------------
-// dispatch
-// ---------------------------------------------------------------------------
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", `'\\''`)}'`
-}
-
-function run(command, args, { timeout = 20_000 } = {}) {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let out = ''
-    let err = ''
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeout)
-    child.stdout.on('data', (chunk) => { out += chunk })
-    child.stderr.on('data', (chunk) => { err += chunk })
-    child.on('error', (error) => {
-      clearTimeout(timer)
-      resolve({ code: null, out, err: String(error.message || error) })
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      resolve({ code, out, err })
-    })
-  })
-}
-
-/**
- * Write the runner script. It owns its own log redirection and its exit marker,
- * so the unit has no reason to phone home: an unfinished run is simply a run
- * whose marker has no content yet.
- */
-function writeRunner({ dir, command, cwd }) {
-  const logPath = join(dir, 'out.log')
-  const exitPath = join(dir, 'exit')
-  const scriptPath = join(dir, 'run.sh')
-  const commandPath = join(dir, 'command.sh')
-  const workdir = cwd || homedir()
-
-  // The caller's text is its own file, run as its own process. Inlined, a single
-  // `exit 0` in the command would end the runner before it could record the
-  // outcome — and the job would look like it never finished.
-  writeFileSync(commandPath, `${command}\n`)
-  chmodSync(commandPath, 0o755)
-
-  writeFileSync(scriptPath, [
-    '#!/usr/bin/env bash',
-    `exec >> ${shellQuote(logPath)} 2>&1`,
-    `cd ${shellQuote(workdir)} || { echo "outlive: cannot enter ${workdir}" >&2; echo "1 $(date +%s%3N)" > ${shellQuote(exitPath)}; exit 1; }`,
-    'echo "outlive: start $(date -Is) in $(pwd)"',
-    `/usr/bin/env bash ${shellQuote(commandPath)}`,
-    'code=$?',
-    'echo "outlive: exit ${code} $(date -Is)"',
-    `echo "$code $(date +%s%3N)" > ${shellQuote(exitPath)}`,
-    'exit "$code"',
-    '',
-  ].join('\n'))
-  chmodSync(scriptPath, 0o755)
-  return { logPath, scriptPath, commandPath }
-}
-
-/**
- * Launch one detached unit and record it.
- *
- * @param spec.kind - `run` or `agent`, for display only
- * @param spec.id - reuse a caller-made id (the agent path needs the task file
- *   written before dispatch, so it reserves the id first)
- */
-async function dispatch(spec) {
-  const id = spec.id || randomUUID().replaceAll('-', '').slice(0, 12)
-  const dir = spec.dir || jobDir(id)
-  mkdirSync(dir, { recursive: true })
-
-  const { logPath, scriptPath } = writeRunner({ dir, command: spec.command, cwd: spec.cwd })
-  const job = {
-    id,
-    kind: spec.kind || 'run',
-    label: spec.label || String(spec.command).split('\n')[0].slice(0, 80),
-    command: spec.command,
-    cwd: spec.cwd || homedir(),
-    unit: `${UNIT_PREFIX}${id}`,
-    dir,
-    logPath,
-    startedAt: new Date().toISOString(),
-    status: 'running',
-    exitCode: null,
-    sessionId: null,
-    notices: [],
-    runtimeMaxSec: spec.runtimeMaxSec,
-  }
-  writeJob(job)
-
-  const env = Object.entries(spec.env && typeof spec.env === 'object' ? spec.env : {})
-    .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
-    .map(([key, value]) => `--setenv=${key}=${value}`)
-
-  const result = await run('systemd-run', [
-    '--user', '--collect', '--quiet',
-    `--unit=${job.unit}`,
-    `--description=outlive: ${String(job.label).slice(0, 120)}`,
-    `--property=RuntimeMaxSec=${job.runtimeMaxSec}`,
-    `--property=WorkingDirectory=${job.cwd}`,
-    `--setenv=HOME=${homedir()}`,
-    `--setenv=PATH=${DEFAULT_PATH}`,
-    `--setenv=LANG=${process.env.LANG || 'C.UTF-8'}`,
-    ...env,
-    '--', '/usr/bin/env', 'bash', scriptPath,
-  ])
-  if (result.code !== 0) {
-    const detail = (result.err || result.out || 'systemd-run failed').trim()
-    job.status = 'failed'
-    job.finishedAt = new Date().toISOString()
-    job.error = detail
-    writeJob(job)
-    return { job, error: detail }
-  }
-  return { job }
-}
-
-/**
- * Stop a job and record the outcome ourselves.
- *
- * Stopping the unit kills the runner too, so the runner can never write its own
- * exit marker — the canceller is the last writer we can rely on. `143` is the
- * conventional 128+SIGTERM, and `killed: true` is what turns it into `killed`
- * rather than a failure.
- */
-async function killUnit(job) {
-  const result = await run('systemctl', ['--user', 'stop', job.unit])
-  if (result.code !== 0) {
-    const detail = (result.err || result.out || 'systemctl stop failed').trim()
-    if (!/not loaded|not found|no such|Failed to stop/i.test(detail)) return { ok: false, detail }
-  }
-  writeFileSync(join(jobDir(job.id), 'exit'), `143 ${Date.now()}`)
-  patchJob(job.id, { killed: true })
-  return { ok: true }
-}
-
-// ---------------------------------------------------------------------------
-// delivery: a finished job is a message the session did not ask for
-// ---------------------------------------------------------------------------
-
-/** Live agents by session id; a restarted harness repopulates this as sessions open. */
-const agents = new Map()
-
-function sessionKey(agent) {
-  const id = agent?.session?.id
-  return id === undefined ? undefined : String(id)
-}
-
-function noticeText(job) {
-  const elapsed = job.finishedAt && job.startedAt
-    ? Math.max(0, Math.round((Date.parse(job.finishedAt) - Date.parse(job.startedAt)) / 1000))
-    : null
-  const head = `[outlive] 任务 ${job.id}（${job.label}）已结束：${job.status}`
-    + (job.exitCode === null ? '' : `，exit ${job.exitCode}`)
-    + (elapsed === null ? '' : `，用时 ${elapsed}s`)
-  const body = tail(job.logPath, 12)
-  return [
-    head,
-    `日志：${job.logPath}`,
-    body ? `最后几行：\n${body}` : '（日志为空）',
-    `要看全部用 outlive_status("${job.id}")。`,
-  ].join('\n')
-}
-
-function userMessage(text, jobId) {
-  return {
-    id: randomUUID(),
-    role: 'user',
-    content: [{ type: 'text', text }],
-    source: { kind: 'outlive', jobId },
-  }
-}
-
-/** Deliver once per owning session; the record keeps the ledger. */
-function deliver(job) {
-  const key = job.sessionId
-  if (!key) return false
-  const agent = agents.get(key)
-  if (!agent) return false
-  if (Array.isArray(job.notices) && job.notices.includes(key)) return false
-  try {
-    agent.followup(userMessage(noticeText(job), job.id))
-  } catch {
-    return false
-  }
-  const current = readJson(join(jobDir(job.id), 'job.json'), job)
-  patchJob(job.id, { notices: [...(current.notices || []), key] })
-  return true
-}
-
-/** Anything that finished while the session was away is still owed to it. */
-function adopt(agent) {
-  const key = sessionKey(agent)
-  if (!key) return
-  agents.set(key, agent)
-  for (const job of listJobs()) {
-    if (job.sessionId !== key || job.status === 'running') continue
-    deliver(job)
-  }
-}
-
-// ---------------------------------------------------------------------------
-// tool plumbing
-// ---------------------------------------------------------------------------
-
-function clip(text, max = MAX_RESULT_BYTES) {
-  const value = String(text ?? '')
-  return value.length <= max ? value : `${value.slice(0, max)}\n…（已截断）`
-}
-
-function textResult(text) {
-  return { text: clip(text) }
-}
-
-function renderText(_args, value) {
-  return [{ type: 'text', text: value.text }]
-}
-
-const output = {
+const textOutput = {
   schema: {
     type: 'object',
     additionalProperties: false,
-    properties: { text: { type: 'string', description: 'Tool result as markdown/plain text.' } },
+    properties: { text: { type: 'string' } },
     required: ['text'],
   },
-  render: renderText,
-}
-
-/** Compile the per-property map into the JSON Schema the registry puts on the wire. */
-function parameterSchema(parameters = {}) {
-  const properties = {}
-  const required = []
-  for (const [key, value] of Object.entries(parameters)) {
-    if (value && value.required === true) {
-      const { required: _required, ...schema } = value
-      properties[key] = schema
-      required.push(key)
-    } else {
-      properties[key] = value
-    }
-  }
-  return { type: 'object', properties, ...(required.length > 0 ? { required } : {}) }
-}
-
-function describe(job) {
-  const exit = job.exitCode === null ? '' : ` exit=${job.exitCode}`
-  return `${job.id}  ${job.status}${exit}  ${job.startedAt}  ${job.label}`
-}
-
-function runtimeMax(value) {
-  return Number.isFinite(value) ? Math.max(1, Math.trunc(value)) : DEFAULT_RUNTIME_MAX_SEC
-}
-
-/**
- * Built-in executors, best first. Each `build` returns a shell snippet rather
- * than an argv: the runner is a shell script, and reading the task out of its
- * file keeps user text away from any quoting boundary.
- *
- * Every one of them is started non-interactively and pre-authorized, because
- * there is no human at the other end to answer a prompt.
- */
-const BUILTIN_ENGINES = {
-  opencode: {
-    label: 'OpenCode',
-    bin: 'opencode',
-    versionArgs: ['--version'],
-    build: (file, title) => 'exec "$(command -v opencode || echo /usr/local/nodejs/bin/opencode)"'
-      + ` run --standalone --auto --archived --title ${shellQuote(title)} -- "$(cat ${shellQuote(file)})"`,
-  },
-  codex: {
-    label: 'Codex',
-    bin: 'codex',
-    versionArgs: ['--version'],
-    build: (file) => 'exec "$(command -v codex || echo /usr/local/nodejs/bin/codex)"'
-      + ` exec --skip-git-repo-check -s workspace-write -- "$(cat ${shellQuote(file)})"`,
-  },
-  claude: {
-    label: 'Claude Code',
-    bin: 'claude',
-    versionArgs: ['--version'],
-    build: (file) => 'exec "$(command -v claude || echo /usr/local/nodejs/bin/claude)"'
-      + ` -p --dangerously-skip-permissions "$(cat ${shellQuote(file)})"`,
+  render(_args, value) {
+    return [{ type: 'text', text: String(value?.text ?? '') }]
   },
 }
 
-// Fixed choices the panel offers as one-click adds. Each is "how do I run this
-// tool non-interactively, once, with a prompt", which is the only thing this
-// plugin needs to know about an agent. `{file}` is the path to the task text,
-// `{title}` a one-line label.
-const AGENT_PRESETS = [
-  {
-    name: 'opencode',
-    label: 'OpenCode',
-    bin: 'opencode',
-    args: 'run --standalone --auto --archived --title {title} -- {file}',
-  },
-  {
-    name: 'codex',
-    label: 'Codex',
-    bin: 'codex',
-    args: 'exec --skip-git-repo-check -s workspace-write -- {file}',
-  },
-  {
-    name: 'claude',
-    label: 'Claude Code',
-    bin: 'claude',
-    args: '-p --dangerously-skip-permissions {file}',
-  },
-  {
-    name: 'gemini',
-    label: 'Gemini CLI',
-    bin: 'gemini',
-    args: '-p {file} --yolo',
-  },
-  {
-    name: 'cursor-agent',
-    label: 'Cursor Agent',
-    bin: 'cursor-agent',
-    args: '-p --force {file}',
-  },
-  {
-    name: 'copilot',
-    label: 'GitHub Copilot CLI',
-    bin: 'copilot',
-    args: '-p {file} --allow-all-tools',
-  },
-]
-
-const PREFERRED_ENGINES = ['opencode', 'codex', 'claude']
-const ENGINE_CACHE_MS = 30_000
-
-// Agents the user added by hand: same shape as a preset, stored beside the jobs
-// so they survive restarts and appear in every session.
-const AGENTS_PATH = join(STATE_DIR, 'agents.json')
-
-function readAgents() {
-  const value = readJson(AGENTS_PATH, undefined)
-  const list = Array.isArray(value && value.agents) ? value.agents : []
-  return list.filter((agent) => agent
-    && typeof agent.name === 'string'
-    && agent.name.trim() !== ''
-    && typeof agent.bin === 'string'
-    && agent.bin.trim() !== '')
+function clampInt(value, min, max, fallback) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.min(max, Math.max(min, Math.trunc(number)))
 }
 
-function writeAgents(agents) {
-  writeFileSync(AGENTS_PATH, `${JSON.stringify({ agents }, null, 2)}\n`)
-  engineCache = undefined
-}
-
-/** Expand a stored args template into the shell snippet that runs one task. */
-function agentCommand(bin, args, file, title) {
-  const body = String(args || '{file}')
-    .replaceAll('{title}', shellQuote(title))
-    .replaceAll('{file}', `"$(cat ${shellQuote(file)})"`)
-  return `exec ${shellQuote(bin)} ${body}`
-}
-
-function findBinary(bin) {
-  const text = String(bin ?? '')
-  if (!text) return undefined
-  if (text.includes('/')) return existsSync(text) ? text : undefined
-  for (const dir of DEFAULT_PATH.split(':')) {
-    if (!dir) continue
-    const candidate = join(dir, text)
-    if (existsSync(candidate)) return candidate
-  }
-  return undefined
-}
-
-function binaryVersion(path, args) {
+function isDirectory(path) {
   try {
-    const out = execFileSync(path, args, { timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
-    return String(out).trim().split('\n')[0].slice(0, 60)
+    return statSync(path).isDirectory()
   } catch {
-    return ''
+    return false
   }
 }
 
-let engineCache
-
-/**
- * What can actually run on this machine right now, in preference order.
- * Detection is a PATH lookup plus a `--version`, so it is cached: a tool call
- * should not pay three process spawns to learn nothing changed.
- */
-function detectedEngines(config, { refresh = false } = {}) {
-  if (!refresh && engineCache && Date.now() - engineCache.at < ENGINE_CACHE_MS) return engineCache.list
-  const list = []
-  const seen = new Set()
-  const push = (entry) => {
-    if (seen.has(entry.name)) return
-    const path = findBinary(entry.bin)
-    if (!path) return
-    seen.add(entry.name)
-    list.push({
-      name: entry.name,
-      label: entry.label || entry.name,
-      bin: path,
-      version: binaryVersion(path, entry.versionArgs || ['--version']),
-      custom: entry.custom === true,
-    })
-  }
-  // Built-ins first, in preference order. A hand-added agent with the same name
-  // *overrides* the built-in (that is how you change its flags without a code
-  // change) instead of being shadowed by it.
-  const saved = readAgents()
-  const override = (name) => saved.find((agent) => agent.name === name)
-  for (const name of [...PREFERRED_ENGINES, ...Object.keys(BUILTIN_ENGINES)]) {
-    const builtin = BUILTIN_ENGINES[name]
-    if (!builtin) continue
-    const mine = override(name)
-    push(mine
-      ? { ...mine, custom: true, label: mine.label || builtin.label }
-      : { ...builtin, name })
-  }
-  for (const agent of saved) {
-    if (!BUILTIN_ENGINES[agent.name]) push({ ...agent, custom: true })
-  }
-  const extra = config?.engines && typeof config.engines === 'object' ? config.engines : {}
-  for (const [name, build] of Object.entries(extra)) {
-    if (typeof build === 'function') push({ name, label: name, bin: name, custom: false })
-  }
-  engineCache = { at: Date.now(), list }
-  return list
+function sessionKey(agent) {
+  const id = agent?.session?.id ?? agent?.sessionId
+  return typeof id === 'string' && id ? id : null
 }
 
-/** How to run one engine by name — built-in preset, hand-added agent, or config fn. */
-function engineBuild(name) {
-  const saved = readAgents().find((agent) => agent.name === name)
-  if (saved) return (file, title) => agentCommand(saved.bin, saved.args, file, title)
-  const builtin = BUILTIN_ENGINES[name]
-  if (builtin) return builtin.build
-  return undefined
-}
-
-/** Resolve `engine` to the snippet that runs it, or say why it cannot. */
-function resolveEngine(requested, config) {
-  const asked = String(requested || 'auto').trim() || 'auto'
-  const available = detectedEngines(config)
-  const pick = asked === 'auto'
-    ? available.find((engine) => engine.name === config?.defaultEngine) ?? available[0]
-    : available.find((engine) => engine.name === asked)
-  if (!pick) {
-    const known = [...new Set([
-      ...PREFERRED_ENGINES,
-      ...readAgents().map((agent) => agent.name),
-      ...Object.keys(config?.engines || {}),
-    ])]
-    return asked === 'auto'
-      ? { error: `本机没检测到可用的编码 agent（找过 ${known.join(' / ')}）。` }
-      : { error: `执行器 "${asked}" 不可用。本机可用：${available.map((e) => e.name).join(', ') || '（无）'}` }
-  }
-  const build = engineBuild(pick.name)
-    ?? (typeof config?.engines?.[pick.name] === 'function' ? config.engines[pick.name] : undefined)
-  if (typeof build !== 'function') return { error: `执行器 "${pick.name}" 没有可用的启动命令。` }
-  return { engine: pick, build }
-}
-
-// ---------------------------------------------------------------------------
-// panel: the small JSON surface the browser side (client.js) reads
-// ---------------------------------------------------------------------------
-
-/**
- * A running job is shown as settled once its exit marker has content, but read
- * here *without* writing: settling is the poll loop's job, and a panel refresh
- * must never steal the one transition that owes the session a notice.
- */
-function peekStatus(job) {
-  if (job.status !== 'running') return job
-  let raw
-  try {
-    raw = readFileSync(join(jobDir(job.id), 'exit'), 'utf8').trim()
-  } catch {
-    return job
-  }
-  if (raw === '') return job
-  const [codeText, atText] = raw.split(/\s+/)
-  const code = Number.parseInt(codeText, 10)
-  const at = Number.parseInt(atText, 10)
-  const exitCode = Number.isFinite(code) ? code : null
-  return {
-    ...job,
-    exitCode,
-    status: job.killed === true ? 'killed' : (exitCode === 0 ? 'completed' : 'failed'),
-    finishedAt: new Date(Number.isFinite(at) ? at : Date.now()).toISOString(),
-  }
-}
-
-function panelJob(job) {
-  const shown = peekStatus(job)
-  return {
-    id: shown.id,
-    status: shown.status,
-    kind: shown.kind,
-    engine: shown.engine || null,
-    label: shown.label,
-    cwd: shown.cwd || null,
-    startedAt: shown.startedAt,
-    finishedAt: shown.finishedAt || null,
-    exitCode: shown.exitCode ?? null,
-    error: shown.error || null,
-  }
-}
-
-function sendText(res, status, body, type = 'text/plain; charset=utf-8') {
-  if (res.headersSent) return
-  res.writeHead(status, {
-    'content-type': type,
-    'cache-control': 'no-store',
-    'content-length': Buffer.byteLength(body),
-  })
-  res.end(body)
-}
-
-function sendJson(res, status, value) {
-  sendText(res, status, JSON.stringify(value), 'application/json; charset=utf-8')
-}
-
-/** What `engine: 'auto'` would pick right now, for the panel header. */
-function resolvedDefault(config) {
-  const picked = resolveEngine('auto', config)
-  return picked.engine ? { name: picked.engine.name, label: picked.engine.label } : null
+function jobLine(job) {
+  const status = job.status
+  const agent = job.agent ? ` · agent ${job.agent}` : ''
+  const exit = Number.isFinite(job.exitCode) ? ` · exit ${job.exitCode}` : ''
+  return `${job.id}  ${status}${exit}  ${job.kind}${agent}  ${job.label || ''}`.trim()
 }
 
 export function apply(ctx, config = {}) {
-  mkdirSync(STATE_DIR, { recursive: true })
+  const pollMs = clampInt(config.pollMs, 500, 60000, DEFAULT_POLL)
+  const stateDir = resolveStateDir({ configured: config.stateDir })
+  const store = createStore({ stateDir })
+  store.ensureBuiltins()
 
-  const register = (definition) => ctx.tools.register({
-    ...definition,
-    parameters: parameterSchema(definition.parameters),
+  const catalog = createAgents({
+    pathEnv: process.env.PATH || '',
+    readCustom: () => store.readAgents(),
   })
+  const sessions = new Map()
+  const defaultCwd = process.cwd()
+  let lastPrune = 0
 
-/** Hand one task description to a coding agent — shared by the tool and the panel. */
-async function startAgentTask({ task, engine: requested, label, cwd, runtimeMaxSec, agent }) {
-  const text = String(task ?? '').trim()
-  if (!text) return { error: 'task 不能为空' }
-  const resolved = resolveEngine(requested, config)
-  if (resolved.error) return { error: resolved.error }
-  const title = String(label ?? '').trim() || text.split('\n')[0].slice(0, 60)
-  const id = randomUUID().replaceAll('-', '').slice(0, 12)
-  const dir = jobDir(id)
-  mkdirSync(dir, { recursive: true })
-  const taskFile = join(dir, 'task.txt')
-  writeFileSync(taskFile, text)
-  const command = resolved.build(taskFile, title)
-  const { job, error } = await dispatch({
-    kind: 'agent',
-    id,
-    dir,
-    command,
-    cwd,
-    label: title,
-    runtimeMaxSec,
-  })
-  if (error) return { error: `投递失败（${error}）\n目录：${dir}`, job }
-  patchJob(job.id, { engine: resolved.engine.name })
-  if (agent) {
-    const sessionId = sessionKey(agent)
-    if (sessionId) {
-      agents.set(sessionId, agent)
-      patchJob(job.id, { sessionId, engine: resolved.engine.name })
+  const defaultAgent = () => {
+    const preferred = config.defaultAgent || config.defaultEngine
+    const result = catalog.resolve(preferred || 'auto')
+    return result.agent?.name ?? null
+  }
+
+  function panelJob(job) {
+    return {
+      id: job.id,
+      kind: job.kind,
+      label: job.label || null,
+      status: job.status,
+      agent: job.agent || null,
+      cwd: job.cwd || null,
+      mode: job.mode || null,
+      restartUnit: job.restartUnit || null,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt || null,
+      exitCode: Number.isFinite(job.exitCode) ? job.exitCode : null,
+      error: job.error || null,
+      builtin: job.builtin || null,
+      logPath: job.logPath,
     }
   }
-  return { job, resolved, taskFile }
-}
 
-  // The panel lives on the same origin as the page, so it rides the host web
-  // server instead of opening a port of its own. No secrets cross this line:
-  // job labels, statuses and the tail of a log the model can already read.
-  //
-  // Routes are registered in a *child* fiber that waits for `webServer`: a
-  // profile without a web server (headless, CLI) must still get the tools, so
-  // this dependency cannot be in `inject`, and a plain `ctx.get()` here would
-  // read `undefined` — bundle plugins mount before the web layers do.
-  ctx.inject(['webServer'], (web) => {
-    web.effect(() => web.webServer.register({
-      kind: 'exact',
-      path: '/__outlive/jobs',
-      handler(_req, res) {
-        sendJson(res, 200, {
-          engines: detectedEngines(config),
-          defaultEngine: resolvedDefault(config),
-          stateDir: STATE_DIR,
-          jobs: listJobs(undefined, false).map(panelJob),
-        })
-      },
+  function agentsView({ refresh = false } = {}) {
+    const list = catalog.list({ refresh }).map((agent) => ({
+      name: agent.name,
+      label: agent.label,
+      bin: agent.bin || null,
+      version: agent.version || null,
+      installed: Boolean(agent.installed),
+      verified: Boolean(agent.verified),
+      source: agent.source,
+      args: agent.args || '',
+      ready: catalog.usable(agent),
     }))
-    web.effect(() => web.webServer.register({
-      kind: 'exact',
-      path: '/__outlive/log',
-      handler(req, res) {
-        const url = new URL(req.url || '/', 'http://localhost')
-        const id = String(url.searchParams.get('id') || '')
-        if (!ID_PATTERN.test(id)) return sendJson(res, 400, { error: 'id 不合法' })
-        const job = readJob(id)
-        if (!job) return sendJson(res, 404, { error: `没有任务 ${id}` })
-        const lines = Math.min(MAX_TAIL_LINES, Math.max(1, Math.trunc(Number(url.searchParams.get('tail')) || 200)))
-        sendText(res, 200, tail(join(jobDir(id), 'out.log'), lines) || '（暂无输出）')
-      },
-    }))
-    // The three surfaces the user asked for from the panel: detect engines
-    // again on demand, keep a short list of tasks worth repeating, and start
-    // one without going through the model.
-    web.effect(() => web.webServer.register({
-      kind: 'exact',
-      path: '/__outlive/engines',
-      handler(req, res) {
-        const url = new URL(req.url || '/', 'http://localhost')
-        const refresh = url.searchParams.get('refresh') === '1'
-        sendJson(res, 200, {
-          engines: detectedEngines(config, { refresh }),
-          defaultEngine: resolvedDefault(config),
-        })
-      },
-    }))
-    // Which agents exist, which ones this machine can actually run, and where
-    // they live. The panel shows the paths on purpose: "why did it pick codex"
-    // is answerable only if you can see that codex is a different binary.
-    web.effect(() => web.webServer.register({
-      kind: 'exact',
-      path: '/__outlive/agents',
-      async handler(req, res) {
-        const method = (req.method || 'GET').toUpperCase()
-        if (method === 'GET') {
-          const url = new URL(req.url || '/', 'http://localhost')
-          const refresh = url.searchParams.get('refresh') === '1'
-          const detected = detectedEngines(config, { refresh })
-          return sendJson(res, 200, {
-            detected,
-            defaultEngine: resolvedDefault(config),
-            presets: AGENT_PRESETS.map((preset) => ({
-              name: preset.name,
-              label: preset.label,
-              bin: preset.bin,
-              args: preset.args,
-              path: findBinary(preset.bin) || null,
-              installed: Boolean(findBinary(preset.bin)),
-              added: readAgents().some((agent) => agent.name === preset.name),
-            })),
-            custom: readAgents(),
-          })
-        }
-        const body = await readPanelJson(req, res)
-        if (body === undefined) return undefined
+    return { list, default: defaultAgent() }
+  }
 
-        // Adding is either "one of the presets" or an explicit bin + args.
-        const presetName = String(body.preset ?? '').trim()
-        const preset = presetName ? AGENT_PRESETS.find((entry) => entry.name === presetName) : undefined
-        const name = String(body.name ?? preset?.name ?? '').trim()
-        const bin = String(body.bin ?? preset?.bin ?? '').trim()
-        const args = String(body.args ?? preset?.args ?? '{file}').trim() || '{file}'
-        if (!name || !bin) return sendJson(res, 400, { error: 'name 和 bin 都要有' })
-        if (!/^[a-zA-Z0-9._-]{1,40}$/.test(name)) return sendJson(res, 400, { error: 'name 只能用字母数字和 ._-' })
-        const resolvedBin = findBinary(bin)
-        if (!resolvedBin) return sendJson(res, 400, { error: `找不到可执行文件：${bin}` })
+  function deliver(job) {
+    const notify = job.notify || { state: 'none', attempts: 0 }
+    if (notify.state !== 'pending') return
+    const agent = sessions.get(job.sessionId)
+    const attempts = (notify.attempts || 0) + 1
+    if (!agent) {
+      store.patchJob(job.id, {
+        notify: { ...notify, attempts, state: attempts >= 5 ? 'skipped' : 'pending' },
+      })
+      return
+    }
+    try {
+      const message = noticeText(job, { lang: pickLang(job.lang) })
+      const result = agent.followup?.(userMessage(message, job.id))
+      if (result && typeof result.catch === 'function') result.catch(() => {})
+      store.patchJob(job.id, {
+        notify: { ...notify, attempts, state: 'delivered', at: new Date().toISOString() },
+      })
+    } catch (error) {
+      store.patchJob(job.id, {
+        notify: {
+          ...notify,
+          attempts,
+          state: attempts >= 5 ? 'failed' : 'pending',
+          error: String(error?.message || error).slice(0, 500),
+        },
+      })
+    }
+  }
 
-        const agents = readAgents().filter((agent) => agent.name !== name)
-        agents.push({ name, label: String(body.label ?? preset?.label ?? name).trim(), bin: resolvedBin, args })
-        writeAgents(agents)
-        return sendJson(res, 200, { agents, detected: detectedEngines(config, { refresh: true }) })
-      },
-    }))
-    web.effect(() => web.webServer.register({
-      kind: 'exact',
-      path: '/__outlive/agents/delete',
-      async handler(req, res) {
-        const body = await readPanelJson(req, res)
-        if (body === undefined) return undefined
-        const name = String(body.name ?? '').trim()
-        const agents = readAgents()
-        const kept = agents.filter((agent) => agent.name !== name)
-        if (kept.length === agents.length) return sendJson(res, 404, { error: '没有这个 agent' })
-        writeAgents(kept)
-        return sendJson(res, 200, { agents: kept, detected: detectedEngines(config, { refresh: true }) })
-      },
-    }))
-    web.effect(() => web.webServer.register({
-      kind: 'exact',
-      path: '/__outlive/tasks',
-      async handler(req, res) {
-        if ((req.method || 'GET').toUpperCase() === 'GET') {
-          return sendJson(res, 200, { tasks: readTasks() })
-        }
-        const body = await readPanelJson(req, res)
-        if (body === undefined) return undefined
-        const task = saveTask({
-          label: body.label,
-          command: body.command,
-          cwd: body.cwd,
-          kind: body.kind,
-          engine: body.engine,
-        })
-        if (!task) return sendJson(res, 400, { error: 'command 不能为空' })
-        return sendJson(res, 200, { task, tasks: readTasks() })
-      },
-    }))
-    web.effect(() => web.webServer.register({
-      kind: 'exact',
-      path: '/__outlive/tasks/delete',
-      async handler(req, res) {
-        const body = await readPanelJson(req, res)
-        if (body === undefined) return undefined
-        const id = String(body.id || '')
-        if (!/^[0-9a-f]{12}$/.test(id)) return sendJson(res, 400, { error: 'id 不合法' })
-        return sendJson(res, 200, { removed: dropTask(id), tasks: readTasks() })
-      },
-    }))
-    web.effect(() => web.webServer.register({
-      kind: 'exact',
-      path: '/__outlive/run',
-      async handler(req, res) {
-        const body = await readPanelJson(req, res)
-        if (body === undefined) return undefined
-        const text = String(body.command ?? '').trim()
-        if (!text) return sendJson(res, 400, { error: 'command 不能为空' })
-        const cwd = String(body.cwd ?? '').trim() || undefined
-        const label = String(body.label ?? '').trim() || undefined
-        const mode = taskKind(body.kind)
+  function adopt(agent) {
+    const key = sessionKey(agent)
+    if (!key) return
+    sessions.set(key, agent)
+    for (const job of store.listJobs()) {
+      if (job.sessionId === key && job.status !== 'running' && job.notify?.state === 'pending') deliver(job)
+    }
+  }
 
-        // Two flavours share one route: a shell command, or a task description
-        // handed to whichever coding agent is installed. From the panel they
-        // look the same — that difference is the point.
-        const started = mode === 'agent'
-          ? await startAgentTask({
-            task: text,
-            engine: body.engine,
-            label,
-            cwd,
-            runtimeMaxSec: runtimeMax(body.runtime_max_sec),
-          })
-          : await dispatch({
-            kind: 'run',
-            command: text,
-            cwd,
-            label,
-            runtimeMaxSec: runtimeMax(body.runtime_max_sec),
-          })
+  function settleJob(job, { probe = true } = {}) {
+    if (job.status !== 'running') return job
+    const age = Date.now() - Date.parse(job.startedAt || 0)
+    let unit = null
+    if (probe && age > 2500) unit = probeUnit(job.unit)
+    const next = store.settle(job, { unit })
+    if (next.status !== 'running' && next.notify?.state === 'pending') deliver(next)
+    return next
+  }
 
-        if (started.error) return sendJson(res, 500, { error: started.error })
-        if (body.taskId) bumpTask(String(body.taskId), started.job.id)
-        return sendJson(res, 200, {
-          id: started.job.id,
-          unit: started.job.unit,
-          kind: mode,
-          engine: mode === 'agent' ? started.resolved.engine.name : undefined,
-        })
+  function tick() {
+    for (const job of store.listJobs()) settleJob(job, { probe: true })
+    const now = Date.now()
+    if (now - lastPrune > 60000) {
+      lastPrune = now
+      store.prune({ keep: RETENTION })
+    }
+  }
+
+  function startScriptJob({ kind, job, scriptPath, env = {}, runtimeMaxSec, description }) {
+    const started = startUnit({
+      unit: unitFor(job.id),
+      description: description || `outlive: ${job.label || job.kind}`,
+      cwd: job.cwd,
+      runtimeMaxSec,
+      scriptPath,
+      env,
+    })
+    if (!started.ok) {
+      const reason =
+        started.error === 'systemdMissing'
+          ? 'systemd-run is not available on this host'
+          : started.detail || started.error
+      return store.patchJob(job.id, {
+        status: 'failed',
+        error: reason,
+        finishedAt: new Date().toISOString(),
+      })
+    }
+    return job
+  }
+
+  function startCommandJob({ command, label, cwd, runtimeMaxSec, env, sessionId = null, lang = 'en' }) {
+    const job = store.createJob({
+      kind: 'command',
+      label: label || String(command).split('\n')[0].slice(0, 60),
+      command,
+      cwd,
+      agent: null,
+      runtimeMaxSec,
+      sessionId,
+      lang: pickLang(lang),
+    })
+    try {
+      if (cwd && !isDirectory(cwd)) throw new Error(`working directory does not exist: ${cwd}`)
+      writeCommandScript(job.dir, command)
+      writeRunScript({
+        dir: job.dir,
+        commandPath: join(job.dir, 'command.sh'),
+        cwd,
+        logPath: job.logPath,
+        exitPath: join(job.dir, 'exit'),
+      })
+      const current = startScriptJob({
+        kind: 'command',
+        job,
+        scriptPath: join(job.dir, 'run.sh'),
+        env,
+        runtimeMaxSec,
+        description: `outlive: ${job.label}`,
+      })
+      return current.status === 'running'
+        ? { job: store.readJob(job.id) }
+        : { job: current, error: current.error || 'dispatchFailed' }
+    } catch (error) {
+      const reason = String(error?.message || error).slice(0, 1000)
+      return { job: store.patchJob(job.id, { status: 'failed', error: reason, finishedAt: new Date().toISOString() }), error: reason }
+    }
+  }
+
+  function startAgentJob({ task, requestedAgent, label, cwd, runtimeMaxSec, env, sessionId = null, lang = 'en' }) {
+    const resolved = catalog.resolve(requestedAgent)
+    if (!resolved.agent) return { error: resolved.error, detail: resolved }
+    const agent = resolved.agent
+    const job = store.createJob({
+      kind: 'agent',
+      label: label || String(task).split('\n')[0].slice(0, 60),
+      command: null,
+      cwd,
+      agent: agent.name,
+      runtimeMaxSec,
+      sessionId,
+      lang: pickLang(lang),
+    })
+    try {
+      if (cwd && !isDirectory(cwd)) throw new Error(`working directory does not exist: ${cwd}`)
+      if (!task.trim()) throw new Error('task is empty')
+      const taskFile = join(job.dir, 'task.txt')
+      writeFileSync(taskFile, `${String(task).replace(/\n*$/, '')}\n`, { mode: 0o600 })
+      const command = buildAgentCommand({ bin: agent.bin, args: agent.args, taskFile, title: job.label })
+      store.patchJob(job.id, { command, taskFile })
+      writeCommandScript(job.dir, command)
+      writeRunScript({
+        dir: job.dir,
+        commandPath: join(job.dir, 'command.sh'),
+        cwd,
+        logPath: job.logPath,
+        exitPath: join(job.dir, 'exit'),
+      })
+      const current = startScriptJob({
+        kind: 'agent',
+        job,
+        scriptPath: join(job.dir, 'run.sh'),
+        env,
+        runtimeMaxSec,
+        description: `outlive: ${agent.name} · ${job.label}`,
+      })
+      return current.status === 'running'
+        ? { job: store.readJob(job.id), agent: agent.name }
+        : { job: current, agent: agent.name, error: current.error || 'dispatchFailed' }
+    } catch (error) {
+      const reason = String(error?.message || error).slice(0, 1000)
+      return { job: store.patchJob(job.id, { status: 'failed', error: reason, finishedAt: new Date().toISOString() }), error: reason }
+    }
+  }
+
+  function startRestartJob({ lang = 'en', sessionId = null } = {}) {
+    let plan
+    try {
+      plan = planRestart({ pid: process.pid })
+    } catch (error) {
+      return { error: 'planFailed', detail: String(error?.message || error) }
+    }
+    const job = store.createJob({
+      kind: 'restart',
+      label: null,
+      builtin: 'restart-dsh',
+      command: restartPlanText(plan),
+      cwd: plan.cwd,
+      agent: null,
+      runtimeMaxSec: 300,
+      sessionId,
+      lang: pickLang(lang),
+      mode: plan.mode,
+      restartUnit: plan.mode === 'unit' ? plan.unit : null,
+      plan: {
+        mode: plan.mode,
+        unit: plan.unit,
+        pid: plan.pid,
+        ports: plan.ports,
+        host: plan.host,
+        argv: plan.argv,
       },
-    }))
-  })
+    })
+    const relaunchUnit = plan.mode === 'unit' ? plan.unit : `outlive-dsh-${job.id}`
+    const envPath = join(job.dir, 'restart.env')
+    try {
+      if (plan.mode === 'process') writeEnvironmentFile(envPath, plan.env)
+      const script = writeRestartScript({
+        dir: job.dir,
+        plan,
+        unit: relaunchUnit,
+        logPath: job.logPath,
+        exitPath: join(job.dir, 'exit'),
+        envPath,
+      })
+      const started = startUnit({
+        unit: unitFor(job.id),
+        description: 'outlive: restart dsh',
+        cwd: plan.cwd,
+        runtimeMaxSec: 300,
+        scriptPath: script,
+        env: {},
+      })
+      if (!started.ok) {
+        const reason = started.error === 'systemdMissing' ? 'systemd-run is not available' : started.detail || started.error
+        return { job: store.patchJob(job.id, { status: 'failed', error: reason, finishedAt: new Date().toISOString() }), error: 'dispatchFailed', detail: reason }
+      }
+      return { job: store.readJob(job.id), plan: { mode: plan.mode, unit: plan.unit, restartUnit: relaunchUnit, pid: plan.pid, ports: plan.ports, host: plan.host } }
+    } catch (error) {
+      const reason = String(error?.message || error).slice(0, 1000)
+      return { job: store.patchJob(job.id, { status: 'failed', error: reason, finishedAt: new Date().toISOString() }), error: 'restartFailed', detail: reason }
+    }
+  }
 
-  register({
-    name: 'outlive_run',
-    description:
-      '把一条 shell 命令投递到 harness 进程之外运行（systemd 瞬态 unit），立刻返回任务 id。\n\n'
-      + '什么时候用它而不是 bash 的后台任务：当这件事必须在下一次 harness 重启之后还活着——重启服务、迁移、'
-      + '长跑（建索引、批量下载、编译）、或者任何“dsh 死了就等于白跑”的工作。bash 的 run_in_background 是 dsh web '
-      + '的子进程，dsh 重启即死；outlive 的 unit 在另一个 cgroup 里，不受影响。\n\n'
-      + '跑完如果会话还活着，会自动收到一条结果消息；会话不在的话，下次打开补发。'
-      + '用 outlive_status 看日志，outlive_list 看历史，outlive_cancel 中止。',
-    parameters: {
-      command: { type: 'string', required: true, description: '要执行的命令（bash 语义，工作目录见 cwd）。' },
-      label: { type: 'string', description: '一句话说明这次在做什么，出现在列表和完成通知里。' },
-      cwd: { type: 'string', description: '工作目录，默认 $HOME。' },
-      runtime_max_sec: { type: 'integer', description: `最长运行秒数，默认 ${DEFAULT_RUNTIME_MAX_SEC}；到点 systemd 杀掉它。` },
-      env: {
+  function agentErrorText(error, detail) {
+    if (error === 'noneReady') {
+      const detected = detail?.detail?.length ? detail.detail.join(', ') : 'none'
+      return `No agent is ready. Detected but not usable: ${detected}. Install OpenCode, Codex, or Claude Code, or add a custom agent in the Outlive panel.`
+    }
+    if (error === 'unknown') return `Unknown agent. Choose one of the detected agents, or run outlive_agents to list them.`
+    if (error === 'notInstalled') return `Agent "${detail?.agent?.name}" is not installed on this host.`
+    if (error === 'needsArguments') return `Agent "${detail?.agent?.name}" needs an argument template with {file} before it can run. Add it in the Outlive panel.`
+    return `Cannot start the job: ${error || 'unknown error'}`
+  }
+
+  const tools = [
+    {
+      name: 'outlive_agent',
+      description:
+        'Hand a self-contained task to a coding agent (OpenCode, Codex, Claude Code, or a custom CLI) that runs outside this session in a detached systemd unit. Returns immediately with a job id; the result is delivered back to this session when the job finishes. Use it for long, independent work that can be verified on its own.',
+      parameters: {
         type: 'object',
-        additionalProperties: { type: 'string' },
-        description: '额外环境变量（走 --setenv 传给 unit）。',
+        additionalProperties: false,
+        properties: {
+          task: { type: 'string', description: 'Complete task description. The agent cannot see this conversation, so include paths, context, and acceptance criteria.' },
+          agent: { type: 'string', description: 'Agent name. Omit to use the preferred installed agent.' },
+          engine: { type: 'string', description: 'Deprecated alias for agent.' },
+          label: { type: 'string', description: 'Short label for the job list.' },
+          cwd: { type: 'string', description: 'Absolute working directory. Defaults to the DSH working directory.' },
+          runtime_max_sec: { type: 'integer', minimum: MIN_RUNTIME, maximum: MAX_RUNTIME, description: `Wall-clock limit in seconds (default ${DEFAULT_RUNTIME}).` },
+        },
+        required: ['task'],
+      },
+      output: textOutput,
+      async execute(args, exec) {
+        const runtimeMaxSec = clampInt(args.runtime_max_sec, MIN_RUNTIME, MAX_RUNTIME, DEFAULT_RUNTIME)
+        const cwd = String(args.cwd || defaultCwd).trim() || defaultCwd
+        const result = startAgentJob({
+          task: String(args.task || ''),
+          requestedAgent: args.agent || args.engine || 'auto',
+          label: args.label,
+          cwd,
+          runtimeMaxSec,
+          sessionId: sessionKey(exec?.agent),
+          lang: 'en',
+        })
+        if (result.error) return text(agentErrorText(result.error, result.detail))
+        const job = result.job
+        return text(
+          `Started job ${job.id} (agent ${result.agent}). It runs outside this session; you will receive a message when it finishes.\nLog: ${job.logPath}\nUse outlive_status with this id to read progress.`,
+        )
       },
     },
-    output,
-    async execute(args, exec) {
-      const command = String(args.command ?? '').trim()
-      if (!command) return textResult('ERROR: command 不能为空')
-      const { job, error } = await dispatch({
-        kind: 'run',
-        command,
-        cwd: args.cwd,
-        label: args.label,
-        env: args.env,
-        runtimeMaxSec: runtimeMax(args.runtime_max_sec),
+    {
+      name: 'outlive_run',
+      description:
+        'Run a shell command outside this session in a detached systemd unit. Use it for builds, migrations, long downloads, or a service restart that must survive this session. Returns immediately with a job id.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          command: { type: 'string', description: 'Shell command to run with bash.' },
+          label: { type: 'string', description: 'Short label for the job list.' },
+          cwd: { type: 'string', description: 'Absolute working directory. Defaults to the DSH working directory.' },
+          runtime_max_sec: { type: 'integer', minimum: MIN_RUNTIME, maximum: MAX_RUNTIME, description: `Wall-clock limit in seconds (default ${DEFAULT_RUNTIME}).` },
+          env: { type: 'object', additionalProperties: { type: 'string' }, description: 'Extra environment variables. Keep secrets out of the command line.' },
+        },
+        required: ['command'],
+      },
+      output: textOutput,
+      async execute(args, exec) {
+        const runtimeMaxSec = clampInt(args.runtime_max_sec, MIN_RUNTIME, MAX_RUNTIME, DEFAULT_RUNTIME)
+        const cwd = String(args.cwd || defaultCwd).trim() || defaultCwd
+        const env = args.env && typeof args.env === 'object' ? args.env : {}
+        const result = startCommandJob({
+          command: String(args.command || ''),
+          label: args.label,
+          cwd,
+          runtimeMaxSec,
+          env,
+          sessionId: sessionKey(exec?.agent),
+          lang: 'en',
+        })
+        if (result.error) return text(`Cannot start the job: ${result.error}`)
+        const job = result.job
+        return text(
+          `Started job ${job.id}. It runs outside this session; you will receive a message when it finishes.\nLog: ${job.logPath}\nUse outlive_status with this id to read progress.`,
+        )
+      },
+    },
+    {
+      name: 'outlive_agents',
+      description: 'List coding agents detected on this host, their versions, and whether their argument template is ready to use.',
+      parameters: { type: 'object', additionalProperties: false, properties: { refresh: { type: 'boolean', description: 'Re-probe instead of using the 30-second cache.' } } },
+      output: textOutput,
+      async execute(args) {
+        const view = agentsView({ refresh: args.refresh === true })
+        const lines = view.list.map((agent) => {
+          const state = agent.ready ? 'ready' : agent.installed ? (agent.args ? 'not ready' : 'needs arguments') : 'not installed'
+          return `${agent.name}  ${state}${agent.version ? `  ${agent.version}` : ''}${agent.bin ? `  ${agent.bin}` : ''}`
+        })
+        return text([`Default agent: ${view.default || 'none'}`, ...lines].join('\n'))
+      },
+    },
+    {
+      name: 'outlive_engines',
+      description: 'Deprecated alias for outlive_agents.',
+      parameters: { type: 'object', additionalProperties: false, properties: {} },
+      output: textOutput,
+      async execute() {
+        const view = agentsView({ refresh: false })
+        return text([`Default agent: ${view.default || 'none'}`, ...view.list.map((agent) => `${agent.name}  ${agent.ready ? 'ready' : agent.installed ? 'not ready' : 'not installed'}`)].join('\n'))
+      },
+    },
+    {
+      name: 'outlive_status',
+      description: 'Read one job: status, exit code, duration, and the last lines of its log.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', description: 'Job id returned by outlive_agent or outlive_run.' },
+          tail_lines: { type: 'integer', minimum: 1, maximum: MAX_TAIL, description: 'How many trailing log lines to include.' },
+        },
+        required: ['id'],
+      },
+      output: textOutput,
+      async execute(args) {
+        const id = String(args.id || '').trim()
+        if (!JOB_ID.test(id)) return text('Invalid job id.')
+        const job = store.readJob(id)
+        if (!job) return text(`No job with id ${id}.`)
+        const current = settleJob(job, { probe: true })
+        const lines = Math.min(MAX_TAIL, Math.max(1, Number(args.tail_lines) || 60))
+        const tail = readLogTail(current.logPath, lines)
+        const header = [
+          `Job ${current.id}  ${current.status}${Number.isFinite(current.exitCode) ? `  exit ${current.exitCode}` : ''}`,
+          `Kind: ${current.kind}${current.agent ? `  Agent: ${current.agent}` : ''}  Started: ${current.startedAt}${current.finishedAt ? `  Finished: ${current.finishedAt}` : ''}`,
+          current.error ? `Error: ${current.error}` : '',
+          `Log: ${current.logPath}`,
+        ]
+          .filter(Boolean)
+          .join('\n')
+        return text(tail ? `${header}\n\n${tail}` : header)
+      },
+    },
+    {
+      name: 'outlive_list',
+      description: 'List recent Outlive jobs, newest first.',
+      parameters: { type: 'object', additionalProperties: false, properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } } },
+      output: textOutput,
+      async execute(args) {
+        const limit = Math.min(100, Math.max(1, Number(args.limit) || 20))
+        const jobs = store.listJobs({ limit })
+        if (!jobs.length) return text('No jobs yet.')
+        return text(jobs.map(jobLine).join('\n'))
+      },
+    },
+    {
+      name: 'outlive_cancel',
+      description: 'Stop a running job. The job is recorded as cancelled; its log stays readable.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { id: { type: 'string', description: 'Job id.' } },
+        required: ['id'],
+      },
+      output: textOutput,
+      async execute(args) {
+        const id = String(args.id || '').trim()
+        if (!JOB_ID.test(id)) return text('Invalid job id.')
+        const job = store.readJob(id)
+        if (!job) return text(`No job with id ${id}.`)
+        if (job.status !== 'running') return text(`Job ${id} is already ${job.status}.`)
+        stopUnit(job.unit)
+        const next = store.patchJob(id, {
+          status: 'cancelled',
+          killed: true,
+          exitCode: 143,
+          finishedAt: new Date().toISOString(),
+          notify: { ...(job.notify || {}), state: job.sessionId ? 'pending' : 'none' },
+        })
+        if (next.notify?.state === 'pending') deliver(next)
+        return text(`Cancelled job ${id}.`)
+      },
+    },
+  ]
+
+  for (const tool of tools) ctx.tools.register(tool)
+
+  // ---- HTTP panel API -----------------------------------------------------
+
+  function send(res, status, body, type = 'application/json; charset=utf-8') {
+    const payload = typeof body === 'string' ? body : JSON.stringify(body)
+    res.statusCode = status
+    res.setHeader('content-type', type)
+    res.setHeader('cache-control', 'no-store')
+    res.setHeader('content-length', Buffer.byteLength(payload))
+    res.end(payload)
+  }
+
+  function readBody(req) {
+    return new Promise((resolve, reject) => {
+      let size = 0
+      const chunks = []
+      req.on('data', (chunk) => {
+        size += chunk.length
+        if (size > MAX_BODY) {
+          reject(Object.assign(new Error('body too large'), { status: 413 }))
+          req.destroy()
+          return
+        }
+        chunks.push(chunk)
       })
-      if (error) return textResult(`ERROR: 投递失败（${error}）\n目录：${job.dir}`)
-      const sessionId = sessionKey(exec?.agent) ?? null
-      if (sessionId) {
-        agents.set(sessionId, exec.agent)
-        patchJob(job.id, { sessionId })
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      req.on('error', reject)
+    })
+  }
+
+  async function readJson(req) {
+    const type = String(req.headers['content-type'] || '')
+    if (!type.includes('application/json')) throw Object.assign(new Error('content-type must be application/json'), { status: 415 })
+    const raw = await readBody(req)
+    try {
+      const value = JSON.parse(raw)
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('body must be an object')
+      return value
+    } catch {
+      throw Object.assign(new Error('invalid JSON'), { status: 400 })
+    }
+  }
+
+  function post(handler) {
+    return async (req, res) => {
+      if (req.headers['x-outlive'] !== '1') return send(res, 403, { error: 'forbidden', detail: 'missing x-outlive header' })
+      try {
+        const body = await readJson(req)
+        const result = await handler(body, req, res)
+        if (!res.writableEnded) send(res, 200, result ?? { ok: true })
+      } catch (error) {
+        const status = error?.status || 500
+        send(res, status, {
+          error: error?.code || (status === 500 ? 'internal' : 'badRequest'),
+          detail: String(error?.message || error).slice(0, 1000),
+        })
       }
-      return textResult([
-        `已投递：${job.id}（unit ${job.unit}）`,
-        `目录：${job.dir}`,
-        `日志：${job.logPath}`,
-        '它在 harness 之外运行，重启 dsh 不会中断；结束时会把结果送回来。',
-      ].join('\n'))
-    },
-  })
+    }
+  }
 
-  register({
-    name: 'outlive_agent',
-    description:
-      '把一整件任务交给一个离场编码 agent 去做：它在本机独立进程里跑，不占当前会话的上下文，'
-      + '也不受 harness 重启影响。返回任务 id，完成时结果送回会话。\n\n'
-      + '引擎默认自动挑：探测本机装了哪些编码 agent（opencode / codex / claude），按这个顺序选第一个可用的；'
-      + '也可以用 engine 点名。想知道探测结果就调 outlive_engines。\n\n'
-      + '和内置 subagent 的区别：内置 subagent 活在 dsh web 里，dsh 一重启就一起没了，而且整个过程占着当前回合；'
-      + 'outlive_agent 是“交出去就不管了”，你可以继续做别的，它跑完来敲你。'
-      + '适合自成一体、耗时、能独立验收的活（写一个脚本并测通、跑一次迁移、某个仓库的调研）。'
-      + '不适合需要你中途盯着、频繁来回确认的活。',
-    parameters: {
-      task: { type: 'string', required: true, description: '完整任务描述。对方看不到这段对话，必须自带上下文、路径和验收标准。' },
-      engine: { type: 'string', description: '执行器；不给就自动挑（opencode → codex → claude 里第一个装着的）。' },
-      label: { type: 'string', description: '一句话标题，出现在列表里。' },
-      cwd: { type: 'string', description: '在哪个目录里干，默认 $HOME。' },
-      runtime_max_sec: { type: 'integer', description: `最长运行秒数，默认 ${DEFAULT_RUNTIME_MAX_SEC}。` },
-    },
-    output,
-    async execute(args, exec) {
-      const started = await startAgentTask({
-        task: args.task,
-        engine: args.engine,
-        label: args.label,
-        cwd: args.cwd,
-        runtimeMaxSec: runtimeMax(args.runtime_max_sec),
-        agent: exec?.agent,
-      })
-      if (started.error) return textResult(`ERROR: ${started.error}`)
-      const { job, resolved, taskFile } = started
-      return textResult([
-        `已交给 ${resolved.engine.label}（${resolved.engine.name}${resolved.engine.version ? ' · ' + resolved.engine.version : ''}）：${job.id}`,
-        `任务文件：${taskFile}`,
-        `日志：${job.logPath}`,
-        '它在本机独立 cgroup 里跑，不受 dsh 重启影响；跑完会把结果送回这个会话。',
-      ].join('\n'))
-    },
-  })
-
-  register({
-    name: 'outlive_engines',
-    description:
-      '看本机现在有哪些编码 agent 可以被 outlive_agent 派活：探测 opencode / codex / claude 装在哪、什么版本，'
-      + '以及 engine 留空时会选哪个。装完新 agent 之后调一次（探测有 30 秒缓存，这里会强制刷新）。',
-    parameters: {},
-    output,
-    async execute() {
-      const available = detectedEngines(config, { refresh: true })
-      if (available.length === 0) {
-        return textResult(`没检测到可用的编码 agent。找过 ${PREFERRED_ENGINES.join(' / ')}，命令行都不在 PATH 里。`)
+  function get(handler) {
+    return async (req, res) => {
+      try {
+        const url = new URL(req.url, 'http://localhost')
+        const result = await handler(url, req)
+        if (!res.writableEnded) send(res, 200, result ?? { ok: true })
+      } catch (error) {
+        const status = error?.status || 500
+        send(res, status, {
+          error: error?.code || (status === 500 ? 'internal' : 'badRequest'),
+          detail: String(error?.message || error).slice(0, 1000),
+        })
       }
-      const fallback = resolvedDefault(config)
-      const custom = Object.keys(config?.engines || {})
-      return textResult([
-        `engine 留空时用：${fallback ? `${fallback.label}（${fallback.name}）` : config?.defaultEngine || '（无）'}`,
-        '',
-        ...available.map((engine) => `- ${engine.name.padEnd(9)}${engine.label.padEnd(12)}${engine.bin}${engine.version ? `  ${engine.version}` : ''}`),
-        ...(custom.length ? ['', `自定义执行器（config.engines）：${custom.join(', ')}`] : []),
-      ].join('\n'))
-    },
+    }
+  }
+
+  function statePayload(flags = {}) {
+    const view = agentsView({ refresh: Boolean(flags.refresh) })
+    const taskState = store.readTaskState()
+    return {
+      version: pkg.version,
+      stateDir,
+      pollMs,
+      defaultCwd,
+      retention: RETENTION,
+      agents: view,
+      jobs: store.listJobs({ limit: 100 }).map(panelJob),
+      tasks: taskState.tasks,
+      builtins: {
+        available: BUILTIN_TASKS.map((entry) => ({ key: entry.key, id: entry.id })),
+        removed: taskState.removedBuiltins,
+      },
+    }
+  }
+
+  const routes = [
+    [
+      '/__outlive/state',
+      get((url) => {
+        if (url.searchParams.get('refresh') === '1') catalog.list({ refresh: true })
+        return statePayload()
+      }),
+    ],
+    [
+      '/__outlive/log',
+      get((url) => {
+        const id = String(url.searchParams.get('id') || '')
+        if (!JOB_ID.test(id)) throw Object.assign(new Error('invalid job id'), { status: 400 })
+        const job = store.readJob(id)
+        if (!job) throw Object.assign(new Error('job not found'), { status: 404 })
+        const tail = clampInt(url.searchParams.get('tail'), 1, MAX_TAIL, 300)
+        return { id, log: readLogTail(job.logPath, tail) }
+      }),
+    ],
+    [
+      '/__outlive/fs',
+      get((url) => {
+        const result = browse({
+          path: url.searchParams.get('path') || '',
+          showHidden: url.searchParams.get('showHidden') === '1',
+          executablesOnly: url.searchParams.get('executablesOnly') === '1',
+        })
+        if (result.error) throw Object.assign(new Error(result.error), { status: result.error === 'denied' ? 403 : 404, code: result.error })
+        return result
+      }),
+    ],
+    [
+      '/__outlive/run',
+      post((body) => {
+        const kind = body.kind === 'command' ? 'command' : body.kind === 'restart' ? 'restart' : 'agent'
+        const lang = pickLang(body.lang)
+        const cwd = String(body.cwd || defaultCwd).trim() || defaultCwd
+        const runtimeMaxSec = clampInt(body.runtime_max_sec, MIN_RUNTIME, MAX_RUNTIME, DEFAULT_RUNTIME)
+        let result
+        if (kind === 'restart') {
+          result = startRestartJob({ lang, sessionId: null })
+        } else if (kind === 'command') {
+          result = startCommandJob({
+            command: String(body.command || ''),
+            label: body.label,
+            cwd,
+            runtimeMaxSec,
+            env: body.env && typeof body.env === 'object' ? body.env : {},
+            lang,
+          })
+        } else {
+          result = startAgentJob({
+            task: String(body.task || ''),
+            requestedAgent: body.agent || body.engine || 'auto',
+            label: body.label,
+            cwd,
+            runtimeMaxSec,
+            env: {},
+            lang,
+          })
+        }
+        if (result.error) return { error: result.error, detail: result.detail || null, job: result.job ? panelJob(result.job) : null }
+        if (body.taskId && TASK_ID.test(String(body.taskId))) store.bumpTask(String(body.taskId))
+        return { job: panelJob(result.job), plan: result.plan || null }
+      }),
+    ],
+    [
+      '/__outlive/cancel',
+      post((body) => {
+        const id = String(body.id || '')
+        if (!JOB_ID.test(id)) throw Object.assign(new Error('invalid job id'), { status: 400 })
+        const job = store.readJob(id)
+        if (!job) throw Object.assign(new Error('job not found'), { status: 404 })
+        if (job.status !== 'running') return { ok: false, detail: 'already settled' }
+        stopUnit(job.unit)
+        const next = store.patchJob(id, {
+          status: 'cancelled',
+          killed: true,
+          exitCode: 143,
+          finishedAt: new Date().toISOString(),
+          notify: { state: 'pending', attempts: 0 },
+        })
+        deliver(next)
+        return { job: panelJob(store.readJob(id) || next) }
+      }),
+    ],
+    [
+      '/__outlive/delete',
+      post((body) => {
+        const id = String(body.id || '')
+        if (!JOB_ID.test(id)) throw Object.assign(new Error('invalid job id'), { status: 400 })
+        const result = store.removeJob(id)
+        if (result.error === 'running') throw Object.assign(new Error('running jobs cannot be deleted'), { status: 409 })
+        if (result.error) throw Object.assign(new Error(result.error), { status: 404 })
+        return { ok: true }
+      }),
+    ],
+    [
+      '/__outlive/jobs/clear',
+      post(() => store.clearSettled()),
+    ],
+    [
+      '/__outlive/agents',
+      post((body) => {
+        const checked = validateCustomAgent(body)
+        if (checked.error) throw Object.assign(new Error(checked.error), { status: 400 })
+        const existing = store.readAgents().find((agent) => agent.name === checked.name)
+        store.upsertAgent({
+          name: checked.name,
+          label: String(body.label || existing?.label || checked.name).slice(0, 60),
+          bin: checked.bin,
+          args: checked.args,
+          createdAt: existing?.createdAt || new Date().toISOString(),
+        })
+        return { agents: agentsView({ refresh: true }), version: probeVersion(checked.bin) }
+      }),
+    ],
+    [
+      '/__outlive/agents/delete',
+      post((body) => {
+        const name = String(body.name || '').trim()
+        if (!name) throw Object.assign(new Error('name is required'), { status: 400 })
+        const result = store.removeAgent(name)
+        if (result.error) throw Object.assign(new Error(result.error), { status: 404 })
+        return { agents: agentsView({ refresh: true }) }
+      }),
+    ],
+    [
+      '/__outlive/tasks',
+      post((body) => {
+        const kind = body.kind === 'command' ? 'command' : 'agent'
+        const result = store.saveTask({
+          kind,
+          task: body.task,
+          command: body.command,
+          agent: body.agent || body.engine,
+          cwd: body.cwd,
+          label: body.label,
+        })
+        if (result.error) throw Object.assign(new Error(result.error), { status: 400 })
+        return { tasks: store.readTasks(), task: result.task }
+      }),
+    ],
+    [
+      '/__outlive/tasks/delete',
+      post((body) => {
+        const id = String(body.id || '')
+        if (!TASK_ID.test(id)) throw Object.assign(new Error('invalid task id'), { status: 400 })
+        const result = store.deleteTask(id)
+        if (result.error) throw Object.assign(new Error(result.error), { status: 404 })
+        return { tasks: store.readTasks(), builtin: result.builtin || null }
+      }),
+    ],
+    [
+      '/__outlive/tasks/restore',
+      post((body) => {
+        const key = String(body.key || '')
+        const result = store.restoreBuiltin(key)
+        if (result.error) throw Object.assign(new Error(result.error), { status: 404 })
+        return { tasks: store.readTasks() }
+      }),
+    ],
+    [
+      '/__outlive/preview',
+      post((body) => {
+        const kind = body.kind === 'command' ? 'command' : body.kind === 'restart' ? 'restart' : 'agent'
+        if (kind === 'restart') {
+          try {
+            const plan = planRestart({ pid: process.pid })
+            return { command: restartPlanText(plan), mode: plan.mode, unit: plan.unit, ports: plan.ports, host: plan.host }
+          } catch (error) {
+            throw Object.assign(new Error(String(error?.message || error)), { status: 500 })
+          }
+        }
+        if (kind === 'command') return { command: String(body.command || '') }
+        const resolved = catalog.resolve(body.agent || body.engine || 'auto')
+        if (!resolved.agent) throw Object.assign(new Error(agentErrorText(resolved.error, resolved)), { status: 400 })
+        const command = buildAgentCommand({
+          bin: resolved.agent.bin,
+          args: resolved.agent.args,
+          taskFile: '<task file>',
+          title: String(body.label || '').slice(0, 200) || 'outlive job',
+        })
+        return { command, agent: resolved.agent.name }
+      }),
+    ],
+  ]
+
+  ctx.inject(['webServer'], (web) => {
+    for (const [path, handler] of routes) {
+      web.effect(() => web.webServer.register({ kind: 'exact', path, handler }))
+    }
   })
 
-  register({
-    name: 'outlive_status',
-    description:
-      '看某个 outlive 任务的现状：状态、退出码、日志尾部。任务目录在磁盘上，所以 harness 重启、会话重开之后照样能查。',
-    parameters: {
-      id: { type: 'string', required: true, description: '任务 id（outlive_run / outlive_agent / outlive_list 给的那个）。' },
-      tail_lines: { type: 'integer', description: `返回最后多少行日志，默认 60，上限 ${MAX_TAIL_LINES}。` },
-    },
-    output,
-    async execute(args) {
-      const job = readJob(args.id)
-      if (!job) return textResult(`ERROR: 没有任务 ${args.id}（在 ${STATE_DIR} 里找不到）`)
-      const settled = settle(job)
-      const lines = Math.min(MAX_TAIL_LINES, Math.max(1, Math.trunc(Number(args.tail_lines) || 60)))
-      const head = [
-        `id=${settled.id} status=${settled.status} exit=${settled.exitCode ?? '-'}`,
-        `label=${settled.label}`,
-        `started=${settled.startedAt} finished=${settled.finishedAt ?? '-'}`,
-        `cwd=${settled.cwd}`,
-        `log=${settled.logPath}`,
-      ]
-      if (settled.error) head.push(`error=${settled.error}`)
-      return textResult(`${head.join('\n')}\n\n${tail(settled.logPath, lines) || '（暂无输出）'}`)
-    },
-  })
-
-  register({
-    name: 'outlive_list',
-    description: '列出最近的 outlive 任务（含跨重启的历史），最新的在前。用来回答“我之前交出去的那些活怎么样了”。',
-    parameters: {
-      limit: { type: 'integer', description: '最多几条，默认 15。' },
-    },
-    output,
-    async execute(args) {
-      const limit = Math.min(100, Math.max(1, Math.trunc(Number(args.limit) || 15)))
-      const jobs = listJobs(limit)
-      if (jobs.length === 0) return textResult('还没有任何 outlive 任务。')
-      const running = jobs.filter((job) => job.status === 'running').length
-      return textResult([
-        `${jobs.length} 条（运行中 ${running}）· 目录 ${STATE_DIR}`,
-        '',
-        ...jobs.map((job) => `- ${describe(job)}`),
-      ].join('\n'))
-    },
-  })
-
-  register({
-    name: 'outlive_cancel',
-    description: '中止一个还在运行的 outlive 任务（给 unit 发 TERM）。已完成的任务不受影响。',
-    parameters: {
-      id: { type: 'string', required: true, description: '任务 id。' },
-    },
-    output,
-    async execute(args) {
-      const job = readJob(args.id)
-      if (!job) return textResult(`ERROR: 没有任务 ${args.id}`)
-      if (job.status !== 'running') return textResult(`任务 ${job.id} 已经是 ${job.status}，无需中止。`)
-      const result = await killUnit(job)
-      return textResult(result.ok
-        ? `已发送 TERM 给 ${job.unit}；用 outlive_status("${job.id}") 确认收尾。`
-        : `ERROR: ${result.detail}`)
-    },
-  })
-
-  // A finished job is owed to the session that started it, even if that session
-  // was closed while it ran. A newly created agent flushes whatever it is owed.
-  ctx.on('agent/created', ({ agent }) => {
-    adopt(agent)
-  })
-
-  // The polling loop is the only thing here that does not survive a restart; the
-  // jobs do. Losing it costs one interval, nothing else.
   ctx.effect(() => {
     const timer = setInterval(() => {
-      // Read raw records here: listJobs() would settle them already, and the
-      // only reason this loop exists is to notice the transition to settled.
-      for (const job of listJobs(undefined, false)) {
-        if (job.status !== 'running') continue
-        const settled = settle(job)
-        if (settled.status !== 'running') deliver(settled)
+      try {
+        tick()
+      } catch {
+        // a ledger read failure must not take the host down
       }
-    }, Number.isFinite(config?.pollMs) ? Math.max(500, config.pollMs) : 3000)
+    }, pollMs)
     timer.unref?.()
-    return () => clearInterval(timer)
+    const warm = setTimeout(() => {
+      try {
+        tick()
+      } catch {
+        // ignore
+      }
+    }, 1000)
+    warm.unref?.()
+    return () => {
+      clearInterval(timer)
+      clearTimeout(warm)
+    }
   })
 
+  const onAgent = (payload) => {
+    const agent = payload?.agent ?? payload
+    if (agent) adopt(agent)
+  }
+  ctx.on('agent/created', onAgent)
+
   return () => {
-    agents.clear()
+    sessions.clear()
+    try {
+      ctx.off?.('agent/created', onAgent)
+    } catch {
+      // the host owns disposal of listeners
+    }
   }
 }
 
-/** The on-disk root this instance reads. Exposed for the README and for tests. */
-export const stateDir = STATE_DIR
-
-/** Exposed for a smoke test: does this plugin see the given job id on disk? */
-export function jobDirForTests(id) {
-  return existsSync(jobDir(id)) ? jobDir(id) : undefined
+function readLogTail(path, lines) {
+  return readTail(path, lines)
 }
+
+export { RETENTION }
